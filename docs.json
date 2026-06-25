@@ -1,72 +1,99 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "eve",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#040404",
+    "light": "#7c7c7c",
+    "dark": "#cdcdcd"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
+  "favicon": "https://media.brand.dev/6ef82987-0f0e-4228-ba55-0d2d83ffe464.png",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "light": "https://media.brand.dev/adec906a-ad71-4409-bc68-edbe7dd3bfac.svg",
+    "dark": "https://media.brand.dev/adec906a-ad71-4409-bc68-edbe7dd3bfac.svg"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/vercel/eve"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/vercel/eve"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "tutorial"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/project-layout",
+              "concepts/agent-config",
+              "concepts/instructions",
+              "concepts/tools",
+              "concepts/skills",
+              "concepts/subagents",
+              "concepts/sandbox"
+            ]
+          },
+          {
+            "group": "Channels & Connections",
+            "pages": [
+              "channels/overview",
+              "channels/platform-channels",
+              "channels/custom-channels",
+              "connections"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/deployment",
+              "guides/frontend",
+              "guides/client-sdk",
+              "guides/schedules",
+              "guides/hooks",
+              "guides/state",
+              "guides/evals"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API Reference",
+            "pages": [
+              "reference/typescript-api",
+              "reference/http-api",
+              "reference/cli",
+              "reference/project-layout"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "reference/execution-model",
+              "reference/sessions-and-streaming",
+              "reference/security-model",
+              "reference/context-control"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

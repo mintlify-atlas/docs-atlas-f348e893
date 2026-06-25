@@ -1,0 +1,132 @@
+---
+title: "Execution Model: Sessions, Turns, and Durable Workflows"
+sidebarTitle: "Execution Model"
+description: "How an eve session runs: three-level nesting of sessions, turns, and steps, durable checkpointing, crash recovery, and parked work."
+---
+
+Every eve session is a durable conversation. It can run for days and survive process restarts and redeploys without any additional configuration on your part. You write the capabilities — tools, instructions, channels — and eve runs the loop. This page explains how that loop is structured, how durability is achieved, and what happens when things go wrong.
+
+## Sessions, turns, and steps
+
+Work inside eve nests in three levels:
+
+| Level | Scope |
+|---|---|
+| **session** | The whole durable conversation or task. Long-lived — can span many requests over days or weeks without losing context. |
+| **turn** | One user message and all the work it triggers (model calls, tool calls, reasoning) until the agent produces its response. |
+| **step** | A durable checkpoint inside a turn — one model call and the tool calls it makes. |
+
+Every turn runs as a durable workflow built on the open-source [Workflow SDK](https://workflow-sdk.dev/) (Vercel Workflow when you deploy on Vercel). eve checkpoints progress and serializes durable state at each step boundary. Your code — tools, the sandbox, subagents — runs inside a managed step, so it feels synchronous even though the session underneath is durable.
+
+<Note>
+You never write workflow code directly. Workflow primitives (`start()`, `resumeHook()`, and so on) are an implementation detail of eve's runtime layer. Two surfaces give your own code access to session data: tools read the current session's metadata via `ctx.session`, and `defineState` reads or writes session-scoped durable state.
+</Note>
+
+## Durable by default: the Workflow SDK
+
+The Workflow SDK is not inherently tied to Vercel. The active *world* determines how workflows are persisted and dispatched:
+
+- **Local development / `eve start`**: uses the SDK's local world by default. Workflow runs are persisted on disk (normally under `.workflow-data`) and dispatched through the same Nitro-hosted workflow routes.
+- **Vercel deployment**: the same workflow code runs against Vercel Workflow, which adds platform features such as latest production deployment routing and dashboard run metadata.
+
+Nitro hosts the HTTP routes and workflow entrypoints. It does not supply the workflow state store or the sandbox runtime — those are separate adapters. Workflow uses the active world implementation; Sandbox uses the backend from `agent/sandbox` or `defaultBackend()`.
+
+When a Vercel production deployment changes, the next model turn in an existing session uses that deployment's current instructions, model, and tools. The durable session keeps its conversation history and authored state, so identity-based channels (Telegram private chats, Twilio phone-number conversations) adopt agent updates without requiring a new session.
+
+## Vercel vs. self-hosted: workflow world differences
+
+For advanced self-hosted deployments, select the installed Workflow world package using `experimental.workflow.world` in `agent/agent.ts`:
+
+```ts title="agent/agent.ts"
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+  experimental: {
+    workflow: {
+      world: "@workflow/world-postgres",
+    },
+  },
+});
+```
+
+The world package backs workflow state, queues, hooks, and streams. Keep secrets and deployment-specific options in runtime environment variables read by that package — never in `agent.ts`. See [Workflow Worlds](https://workflow-sdk.dev/worlds) for available implementations.
+
+<Tip>
+On Vercel, the world is selected automatically. You only need `experimental.workflow.world` when self-hosting with a non-default state backend such as Postgres.
+</Tip>
+
+## Resuming after a crash
+
+Crash the process, hit a timeout, or redeploy mid-turn, and the run picks up from the last completed step rather than replaying the whole turn.
+
+<Steps>
+  <Step title="Step completes and is checkpointed">
+    eve serializes the step result to durable state before moving on.
+  </Step>
+  <Step title="Process crashes or is redeployed">
+    The in-flight turn is interrupted. The workflow run is marked as needing recovery.
+  </Step>
+  <Step title="Run resumes from the last checkpoint">
+    Completed steps are never re-run — eve replays the recorded result. Only the interrupted step re-executes.
+  </Step>
+</Steps>
+
+<Warning>
+A step interrupted mid-execution will re-run from the start. Make non-idempotent side effects like charges or emails idempotent, or gate them with an approval tool, to prevent duplicates on replay.
+</Warning>
+
+There is nothing to configure. eve owns the workflow lifecycle, and sessions are durable by default.
+
+## Parked work: human-in-the-loop, OAuth, subagents
+
+Some work has to wait. At those points the turn *parks* durably:
+
+- **Human approval**: a tool gated on human approval suspends the turn.
+- **Interactive OAuth**: a connection initiating a sign-in flow parks while the user completes it.
+- **Long-running subagents**: a delegated subagent running in its own session parks the parent until the child completes.
+
+When a turn parks, the workflow suspends and holds no compute, no matter how long the wait. When the input arrives — a click, a callback, a child completing — the conversation picks up exactly where it left off.
+
+## Message delivery and queueing
+
+eve does not maintain a durable FIFO queue of user messages for a session. Understanding this distinction is important for building reliable agents.
+
+<Note>
+The `continuationToken` is a **resume handle** for the session's current workflow hook, not a general message-queue address. Only one active session can own a continuation token at a time.
+</Note>
+
+The delivery contract works like this:
+
+- When a session is **waiting**, delivering to the current continuation token wakes the session and starts the next turn.
+- When a turn is **already active**, the hook may accept additional deliveries, but the runtime only drains them at specific workflow boundaries. If more than one delivery is ready when the driver checks, eve may fold them into the next turn — this drain is best-effort and depends on workflow and transport timing.
+- A competing session that tries to claim an already-owned token is **rejected**, not queued.
+
+For deterministic behavior, send one user turn at a time and wait for `session.waiting` before sending the next message to the same session. If your channel can receive bursts while the agent is working, maintain your own per-session queue in the channel or app layer, then deliver the next message after the session parks again.
+
+<Warning>
+Do not rely on concurrent sends to the same session behaving like a typical ordered chat queue. The `continuationToken` is a resume handle, not an inbox address.
+</Warning>
+
+## Session history ordering
+
+Conversation history within a session is append-only. Turns land in order, and the tool calls inside a turn (plus their results) keep their order too. Reading a session back shows events in the order they happened.
+
+## Subagents
+
+A turn can hand work off to a subagent. Each subagent gets its own context and its own durable session. A declared subagent also gets its own sandbox, skills, and state. Nothing crosses the boundary implicitly — the parent session only sees what the child explicitly returns.
+
+<CardGroup cols={2}>
+  <Card title="Sessions & Streaming" href="/reference/sessions-and-streaming">
+    The handles you hold and the event stream you watch.
+  </Card>
+  <Card title="Security Model" href="/reference/security-model">
+    The trust boundaries the runtime enforces.
+  </Card>
+  <Card title="Context Control" href="/reference/context-control">
+    Managing what the model sees across instructions, skills, and subagents.
+  </Card>
+  <Card title="Workflow Worlds" href="https://workflow-sdk.dev/worlds">
+    Available world implementations for self-hosted deployments.
+  </Card>
+</CardGroup>

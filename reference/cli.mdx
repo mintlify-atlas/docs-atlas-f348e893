@@ -1,0 +1,317 @@
+---
+title: "CLI Reference: eve init, dev, build, deploy, and More"
+sidebarTitle: "CLI"
+description: "Full reference for every eve CLI command: init, info, build, start, dev, link, deploy, eval, and channels subcommands."
+---
+
+The `eve` binary runs from your app root. Every command first loads `.env` and `.env.local` from that root before doing anything else. Running `eve` with no command is equivalent to running `eve dev`.
+
+## Commands at a glance
+
+| Command | Description |
+|---------|-------------|
+| `eve init [target]` | Scaffold a new agent, or add one to an existing project directory |
+| `eve info` | Print the resolved application: discovered tools, skills, subagents, schedules, channels, routes, artifact paths, and discovery diagnostics |
+| `eve build` | Compile `.eve/` artifacts and build the host output; prints the output directory |
+| `eve start` | Serve the previously built `.output/` app; prints the listening URL |
+| `eve dev` | Start the local dev server and open the terminal UI |
+| `eve dev <url>` | Connect the terminal UI to an existing server URL instead of booting a local server |
+| `eve link` | Link the directory to a Vercel project and pull AI Gateway credentials |
+| `eve deploy` | Deploy the agent to Vercel production (links first if needed) |
+| `eve eval` | Run evals against the local app or a remote target |
+| `eve channels add [kind]` | Scaffold a channel interactively, or by kind (`slack` \| `web`) |
+| `eve channels list` | List user-authored channels in the current project |
+
+---
+
+## `eve init`
+
+```bash
+eve init [target] [--channel-web-nextjs]
+```
+
+The optional `target` controls the scaffolding mode:
+
+- **A name** (`eve init my-agent`) scaffolds a fresh project in a new `my-agent/` directory, installs dependencies, and initializes Git.
+- **An existing directory** (`eve init .`) adds an agent to that project. Requires a `package.json`; `agent/` files must not exist yet. Adds `eve`, `ai`, and `zod` dependencies without touching anything else.
+- **No target** scaffolds or updates the current directory, same as `eve init .`. Exception: when running inside a coding agent CLI (Claude Code, Cursor, Codex, etc.), a bare `eve init` prints a setup guide instead of scaffolding.
+
+On an interactive terminal, when a supported coding-agent CLI (`claude`, `codex`, `cursor-agent`, `droid`, `gemini`, `opencode`, or `pi`) is on `PATH`, `eve init` offers available REPLs and `eve dev` (the default). Each REPL receives a project-specific prompt.
+
+<ParamField query="--channel-web-nextjs" type="flag">
+  Add the Web Chat application (a Next.js app) to the fresh project. Rejected when adding to an existing project — run `eve channels add web` there instead.
+</ParamField>
+
+---
+
+## `eve info`
+
+```bash
+eve info [--json]
+```
+
+Prints the fully resolved application surface: discovered tools, skills, subagents, schedules, channels, routes, artifact paths, and any discovery diagnostics (errors and warnings).
+
+Run this first when something behaves unexpectedly. It confirms that a file was discovered and surfaces errors faster than booting the dev server.
+
+<ParamField query="--json" type="flag">
+  Emit output as JSON instead of formatted text.
+</ParamField>
+
+---
+
+## `eve build`
+
+```bash
+eve build
+```
+
+Compiles `.eve/` artifacts and builds the host output, then prints the built output path. No flags.
+
+When `eve build` fails on discovery errors, it prints the full diagnostics report (severity, message, source path) and the diagnostics artifact path.
+
+### Artifacts written under `.eve/`
+
+These artifacts are preserved even on partial failure and are useful for debugging:
+
+| Artifact | Description |
+|----------|-------------|
+| `.eve/discovery/agent-discovery-manifest.json` | What eve found on disk |
+| `.eve/discovery/diagnostics.json` | Authored-shape errors and warnings |
+| `.eve/compile/compiled-agent-manifest.json` | The serialized authored surface eve loads at runtime |
+| `.eve/compile/compile-metadata.json` | Build-time metadata and paths |
+| `.eve/compile/module-map.mjs` | Compiled module entrypoints eve imports at runtime |
+
+---
+
+## `eve start`
+
+```bash
+eve start [--host <host>] [--port <port>]
+```
+
+Serves the previously built output. Prints the listening URL.
+
+<ParamField query="--host" type="string">
+  Host interface to bind. Defaults to all interfaces.
+</ParamField>
+
+<ParamField query="--port" type="number">
+  Port to listen on. Defaults to `$PORT`, then `3000`.
+</ParamField>
+
+---
+
+## `eve dev`
+
+```bash
+eve dev [options]
+eve dev https://your-app.vercel.app
+```
+
+Starts the local dev server with hot module replacement and opens the interactive terminal UI. Pass a bare URL as the only argument to connect the UI to an existing server instead of booting a local one — useful for smoke-testing a preview or production deployment.
+
+The interactive UI turns off automatically in a non-TTY terminal.
+
+<ParamField query="--host" type="string">
+  Host interface to bind. Defaults to all interfaces.
+</ParamField>
+
+<ParamField query="--port" type="number">
+  Port to listen on. Defaults to `$PORT`, then `3000`.
+</ParamField>
+
+<ParamField query="-u, --url" type="string">
+  Connect to an existing server URL instead of starting one.
+</ParamField>
+
+<ParamField query="--no-ui" type="flag">
+  Start the server without an interactive terminal UI. Use this for headless verification and CI.
+</ParamField>
+
+<ParamField query="--name" type="string">
+  Title shown in the terminal UI. Defaults to the app folder name.
+</ParamField>
+
+<ParamField query="--input" type="string">
+  Pre-fill the prompt input after launching the UI (editable, not auto-submitted).
+</ParamField>
+
+<ParamField query="--tools" type="enum">
+  Tool-call rendering mode: `full` | `collapsed` | `auto-collapsed` | `hidden`. Default: `auto-collapsed`.
+</ParamField>
+
+<ParamField query="--reasoning" type="enum">
+  Reasoning rendering mode: `full` | `collapsed` | `auto-collapsed` | `hidden`. Default: `full`.
+</ParamField>
+
+<ParamField query="--subagents" type="enum">
+  Subagent-section rendering mode: `full` | `collapsed` | `auto-collapsed` | `hidden`. Default: `auto-collapsed`.
+</ParamField>
+
+<ParamField query="--connection-auth" type="enum">
+  Connection-authorization rendering mode: `full` | `collapsed` | `auto-collapsed` | `hidden`. Default: `full`.
+</ParamField>
+
+<ParamField query="--assistant-response-stats" type="enum">
+  Assistant header statistic: `tokens` | `tokensPerSecond`. Default: `tokensPerSecond`.
+</ParamField>
+
+<ParamField query="--context-size" type="number">
+  Model context window size in tokens, shown as a usage percentage in the UI.
+</ParamField>
+
+<ParamField query="--logs" type="enum">
+  Server/agent log streams to show: `all` | `stderr` | `sandbox` | `none`. Default: `stderr`.
+</ParamField>
+
+<Note>
+  Local dev writes the active server process ID to `.eve/dev-process.pid`. If another `eve dev` starts for the same agent while that process is still running, eve exits with a message that includes the command to stop the existing server.
+</Note>
+
+---
+
+## `eve link`
+
+```bash
+eve link
+```
+
+Links the current directory to an existing Vercel project and pulls AI Gateway credentials into `.env.local`. You select a team and then one of its projects; type a name and choose **Search for '\<name\>'** to search further.
+
+Running `eve link` again re-links: the pickers always run and the new choice wins. This command is interactive only — in CI, use `vercel link --project <name> --yes --non-interactive` instead.
+
+A running `eve dev` reloads env files automatically after linking; no restart is needed.
+
+---
+
+## `eve deploy`
+
+```bash
+eve deploy
+```
+
+Deploys the agent to Vercel production (`vercel deploy --prod`), installing dependencies first and pulling environment variables after. An already-linked project deploys with or without a TTY. An unlinked directory walks the `eve link` pickers when a terminal is present, and exits with guidance otherwise.
+
+---
+
+## `eve eval`
+
+```bash
+eve eval [evalId...] [--url <url>] [options]
+```
+
+Runs all discovered evals when no IDs are given. IDs match exactly or by directory prefix — `eve eval weather` runs everything under `evals/weather/`.
+
+**Exit codes:**
+- `0` — every eval passed its checks
+- `1` — any eval failed (failed check, execution error, or `--strict` threshold miss)
+- `2` — configuration errors
+
+<ParamField query="--url" type="string">
+  Remote agent URL to target. Skips local host startup.
+</ParamField>
+
+<ParamField query="--tag" type="string">
+  Run only evals carrying a specific tag. Repeatable.
+</ParamField>
+
+<ParamField query="--strict" type="flag">
+  Below-threshold scores also fail the exit code.
+</ParamField>
+
+<ParamField query="--list" type="flag">
+  Print discovered evals without running them.
+</ParamField>
+
+<ParamField query="--timeout" type="number">
+  Per-eval timeout in milliseconds.
+</ParamField>
+
+<ParamField query="--max-concurrency" type="number">
+  Maximum number of concurrent eval executions. Default: `8`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Output results as JSON.
+</ParamField>
+
+<ParamField query="--junit" type="string">
+  Write JUnit XML results to the specified file path.
+</ParamField>
+
+<ParamField query="--skip-report" type="flag">
+  Skip eval-defined reporters (e.g. Braintrust).
+</ParamField>
+
+<ParamField query="--verbose" type="flag">
+  Stream per-eval `t.log` lines to stdout.
+</ParamField>
+
+---
+
+## `eve channels add`
+
+```bash
+eve channels add [kind] [-f] [-y]
+```
+
+Scaffolds a channel into `agent/channels/`. With no `kind` argument, prompts interactively. Pass a `kind` to scaffold directly: `slack` or `web`.
+
+<ParamField query="kind" type="string">
+  Channel kind to scaffold: `slack` | `web`. Omit to choose interactively.
+</ParamField>
+
+<ParamField query="-f, --force" type="flag">
+  Overwrite existing channel files.
+</ParamField>
+
+<ParamField query="-y, --yes" type="flag">
+  Assume yes for confirmations. Requires an explicit `kind`.
+</ParamField>
+
+---
+
+## `eve channels list`
+
+```bash
+eve channels list [--json]
+```
+
+Lists the user-authored channels in the current project.
+
+<ParamField query="--json" type="flag">
+  Output as JSON.
+</ParamField>
+
+---
+
+## Recommended development loop
+
+```bash
+# 1. Edit files under agent/
+# 2. Confirm discovery
+eve info
+
+# 3. Iterate locally
+eve dev
+
+# 4. Prepare for production
+eve build
+
+# 5. Smoke-test the build
+eve start
+```
+
+<Tip>
+  Use `eve dev --no-ui` for headless verification in automated environments or when a coding agent is running the server.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Project Layout" icon="folder-tree" href="./project-layout">
+    What eve info discovers on disk
+  </Card>
+  <Card title="TypeScript API" icon="code" href="./typescript-api">
+    define* helpers and import paths
+  </Card>
+</CardGroup>

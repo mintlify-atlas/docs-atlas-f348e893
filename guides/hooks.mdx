@@ -1,0 +1,186 @@
+---
+title: "Hooks: React to Agent Lifecycle and Stream Events in eve"
+sidebarTitle: "Hooks"
+description: "Use defineHook from eve/hooks to subscribe to runtime stream events for audit logging, metrics, alerting, or persisting session data to your own database."
+---
+
+Hooks are eve's authored extension points for the runtime event stream. A hook subscribes to stream events and runs side effects after each event is durably recorded — audit logging, metrics, alerting, or persisting every session and message to your own database. Reach for a hook to observe what the agent does without writing a tool, a context provider, or a channel adapter handler.
+
+## Define a hook
+
+Hook files live under `agent/hooks/`. The slug is the path-relative basename: `agent/hooks/audit.ts` becomes `"audit"`, and `agent/hooks/auth/load-profile.ts` becomes `"auth/load-profile"`.
+
+```ts title="agent/hooks/audit.ts"
+import { defineHook } from "eve/hooks";
+
+export default defineHook({
+  events: {
+    async "session.started"(_event, ctx) {
+      console.info("session started", { sessionId: ctx.session.id });
+    },
+    async "message.completed"(event) {
+      console.info("model finished", { length: event.data.message?.length ?? 0 });
+    },
+  },
+});
+```
+
+`defineHook`, `HookDefinition`, and `HookContext` all live on `eve/hooks`.
+
+Declare stream-event subscribers under the `events` map, keyed by event type. Use `*` to match every event. You can subscribe to any event in the runtime stream vocabulary — including lifecycle events like `session.started`, `turn.started`, `turn.completed`, `message.completed`, and `action.result`.
+
+<Note>
+Hook handlers are observe-only. They cannot inject model context. To contribute runtime model messages, use `defineDynamic` and `defineInstructions` in `agent/instructions/`.
+</Note>
+
+## Hook context
+
+Every handler receives the same `HookContext` as its second argument:
+
+```ts
+interface HookContext {
+  readonly agent: { readonly name: string; readonly nodeId?: string };
+  readonly channel: { readonly kind?: string; readonly continuationToken?: string };
+  readonly session: { readonly id: string };
+}
+```
+
+## Lifecycle events
+
+Common events to subscribe to in hooks:
+
+| Event | When it fires |
+| ----- | ------------- |
+| `session.started` | A new session begins. |
+| `turn.started` | A new turn begins within the session. |
+| `turn.completed` | A turn finishes successfully. |
+| `turn.failed` | A turn finishes with an error. |
+| `message.completed` | The model completes a message. |
+| `action.result` | A tool call returns a result. |
+| `actions.requested` | The model requests tool calls. |
+| `input.requested` | A tool or the model requests human input. |
+| `session.completed` | The session ends successfully. |
+| `session.failed` | The session ends with a terminal failure. |
+| `*` | Every event in the stream. |
+
+## Narrowing tool results
+
+`toolResultFrom` narrows an `action.result` event to a specific authored tool or MCP connection and returns typed output. Import it from `eve/tools`:
+
+```ts title="agent/hooks/log-results.ts"
+import { defineHook } from "eve/hooks";
+import { toolResultFrom } from "eve/tools";
+import getWeather from "../tools/get-weather";
+import linear from "../connections/linear";
+
+export default defineHook({
+  events: {
+    "action.result"(event) {
+      // Authored tool: output is typed as the tool's return type
+      const weather = toolResultFrom(event.data.result, getWeather);
+      if (weather) {
+        console.log(weather.output.temperature);
+      }
+
+      // MCP connection: output is unknown, toolName is qualified
+      const linearResult = toolResultFrom(event.data.result, linear);
+      if (linearResult) {
+        console.log(linearResult.connectionToolName, linearResult.output);
+      }
+    },
+  },
+});
+```
+
+`toolResultFrom` returns `undefined` when the result doesn't match, or when `isError` is `true`. For authored tools, the return includes `{ output, toolName, callId }` with `output` typed as the tool's `TOutput`. For connections, it includes `{ output, toolName, connectionToolName, callId }` with `output` as `unknown`.
+
+## A complete observability example
+
+```ts title="agent/hooks/observability.ts"
+import { defineHook } from "eve/hooks";
+
+export default defineHook({
+  events: {
+    async "session.started"(_event, ctx) {
+      await db.sessions.insert({
+        id: ctx.session.id,
+        startedAt: new Date(),
+        channel: ctx.channel.kind,
+      });
+    },
+
+    async "message.completed"(event, ctx) {
+      await db.messages.insert({
+        sessionId: ctx.session.id,
+        message: event.data.message,
+        finishReason: event.data.finishReason,
+      });
+    },
+
+    async "session.completed"(_event, ctx) {
+      await db.sessions.update(ctx.session.id, { completedAt: new Date() });
+    },
+  },
+});
+```
+
+## Execution order
+
+When a stream event fires, three things happen in order:
+
+1. **Emit.** The channel adapter handler runs, then the event is written to the durable stream.
+2. **Hooks.** Stream-event hooks fire (typed handlers first, then the `*` wildcard). Return values are ignored.
+3. **Dynamic tool resolvers.** Resolvers subscribed to the event type run and update the tool set.
+
+Hooks always run after the event is durably recorded, so if a hook throws, the stream stays consistent.
+
+## Error handling
+
+A thrown handler propagates through the emit composer and surfaces as `turn.failed`. If a hook subscribed to a failure-cascade event also throws, it escalates to `session.failed`. For belt-and-suspenders semantics inside a hook, wrap the body in `try`/`catch` — eve treats a thrown hook as a real failure.
+
+<Warning>
+Don't let hook errors go unhandled in production. A thrown hook in `turn.started` or `message.completed` will fail the current turn.
+</Warning>
+
+## Subagent isolation
+
+Subagents may carry their own `agent/hooks/` directory. Subagent hooks fire only inside the subagent scope. Parent-agent hooks do not fire for subagent turns, and subagent hooks see only the subagent's own context.
+
+## Hook vs tool vs context provider
+
+| Need | Use |
+| ---- | --- |
+| Observe runtime events (audit, metrics, alerting) | `events.<type>` hook (or a channel adapter handler) |
+| Provide structured input to the model on demand | A tool |
+| Make a value available across the entire step | A context provider |
+| Subscribe to platform-specific events | A channel adapter handler |
+
+Stream-event hooks and channel adapter event handlers are structurally identical. Choose the channel adapter handler when authoring adapter-specific behavior, and choose `events.*` when authoring agent-level behavior that should fire across every channel.
+
+## File structure
+
+```text
+agent/
+└── hooks/
+    ├── audit.ts              # slug: "audit"
+    ├── observability.ts      # slug: "observability"
+    └── auth/
+        └── load-profile.ts   # slug: "auth/load-profile"
+```
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="State" href="/guides/state">
+    Read and write durable per-session state from inside hooks
+  </Card>
+  <Card title="Tools" href="/concepts/tools">
+    The surface most hooks observe through action.result events
+  </Card>
+  <Card title="Schedules" href="/guides/schedules">
+    Use hooks to observe lifecycle events from scheduled sessions
+  </Card>
+  <Card title="Sessions & Streaming" href="/reference/sessions-and-streaming">
+    The full event stream vocabulary hooks subscribe to
+  </Card>
+</CardGroup>

@@ -1,0 +1,119 @@
+---
+title: "eve Project Layout: How the Filesystem Defines Your Agent"
+sidebarTitle: "Project Layout"
+description: "Learn how eve's filesystem-first design maps every file path to an agent identity, slot, and capability — no name fields required."
+---
+
+eve builds an agent by walking the filesystem under `agent/`. The directory structure is not just an organizational convention — it is the configuration. The slot a file lands in determines how eve loads it, and the path itself becomes the name the model sees. You never write a `name` or `id` field on a `define*` call; the filesystem provides both.
+
+## The naming rule
+
+Identity comes from the path. Every `define*` helper picks up its name from the filename or directory, so there is no duplication between code and config.
+
+| Path | Resolves to |
+| ------------------------------------- | --------------------- |
+| `agent/tools/get_weather.ts` | tool `get_weather` |
+| `agent/connections/linear.ts` | connection `linear` |
+| `agent/skills/summarize.md` | skill `summarize` |
+| `agent/subagents/researcher/agent.ts` | subagent `researcher` |
+
+The root agent takes its name from the enclosing `package.json` `name` field, falling back to the app-root directory name when `package.json` has no `name`. A subagent takes its name from its directory under `subagents/`.
+
+Tool files use snake\_case slugs (e.g. `get_weather.ts`, `refund_charge.ts`). That slug is exactly what the model sees as the tool name, so keep it lowercase and underscore-separated.
+
+## Recommended layout
+
+The standard project separates the app root from the authored surface under `agent/`. Evals live at the app root as a sibling of `agent/`, not inside it.
+
+```text
+my-agent/
+├── package.json
+├── tsconfig.json
+├── agent/
+│   ├── agent.ts
+│   ├── instructions.md
+│   ├── instrumentation.ts
+│   ├── channels/
+│   ├── connections/
+│   ├── hooks/
+│   ├── skills/
+│   ├── lib/
+│   ├── sandbox/
+│   ├── tools/
+│   ├── schedules/
+│   └── subagents/
+└── evals/
+```
+
+<Tip>
+A flat layout is supported when the app root and agent root are the same directory, but the nested layout above is preferred because it keeps the app root clean.
+</Tip>
+
+## Slot table
+
+The table below lists every authored slot. The **Subagents** column indicates whether a declared subagent (`subagents/<id>/`) can use that slot. A declared subagent inherits nothing from the root — it discovers its own slots independently.
+
+| Path | Description | Subagents | Notes |
+| ------------------------------------------------------- | ------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent.ts` | Runtime config | Yes | Model, modelOptions, compaction, build, experimental. See [Agent Config](/concepts/agent-config). |
+| `instructions.md` / `instructions.ts` / `instructions/` | Base system prompt | Optional | A flat file, or a directory of `.md` and `.ts` files. Static sources compose at build time. Dynamic sources (`defineDynamic` + `defineInstructions`) resolve at runtime. Required on the root, optional on subagents. |
+| `instrumentation.ts` | Telemetry config | No | OTel exporter and AI SDK span settings, auto-discovered and run before agent code. Root-only. |
+| `channels/` | HTTP / messaging entrypoints | No | Root-only. |
+| `connections/` | External service connections (MCP, OpenAPI) | Yes | One connection per file; name derived from filename. |
+| `hooks/` | Lifecycle and stream-event subscribers | Yes | Module-backed only. Recursive directories supported. |
+| `skills/` | On-demand procedures and capability packs | Yes | Flat markdown, module-backed skills, or packaged skills. Seeded into `/workspace/skills/...`. |
+| `lib/` | Shared authored helper code | Yes | Import-only; not mounted into the workspace. |
+| `sandbox.ts` or `sandbox/sandbox.ts` | The agent's single sandbox | Yes | Use top-level `sandbox.ts` for a definition-only override; use `sandbox/sandbox.ts` + `sandbox/workspace/**` to also seed files. Framework default applies when neither is authored. |
+| `sandbox/workspace/**` | Files seeded into the sandbox | Yes | Mirrored into `/workspace/...` at session bootstrap. |
+| `tools/` | Typed executable integrations | Yes | Module-backed only. |
+| `schedules/` | Recurring jobs | No | Each schedule is `<name>.ts` (default-exported `defineSchedule`) or `<name>.md` (frontmatter `cron:` + prompt body). Recursive nesting supported. Root-only. |
+| `subagents/` | Specialist child agents | Yes | Each child is its own local package under `subagents/<id>/`. Nested subagents are supported. |
+
+## What reaches the runtime workspace
+
+eve does not mount the whole `agent/` tree into the sandbox. Only two sources land in `/workspace`:
+
+- `skills/` files → `/workspace/skills/...`
+- `agent/sandbox/workspace/**` → `/workspace/...` at session bootstrap
+
+Everything under `lib/` stays as import-only source code and never reaches the workspace.
+
+## Local subagent layout
+
+A local subagent lives under `subagents/<id>/` and uses the same `agent.ts` shape as the root agent. It has its own full authored surface, but channels and schedules are not supported inside subagents.
+
+```text
+agent/subagents/researcher/
+├── agent.ts
+├── instructions.md
+├── connections/
+├── hooks/
+├── skills/
+├── lib/
+├── sandbox/
+├── tools/
+└── subagents/
+```
+
+<Note>
+`agent.ts` is required for every declared subagent and **must** export a `description`. The parent reads that description to decide when to delegate to the child.
+</Note>
+
+## Flat layout
+
+When the app root is also the agent root, a flat layout is valid:
+
+```text
+my-agent/
+├── package.json
+├── agent.ts
+├── instructions.md
+├── tools/
+└── skills/
+```
+
+Prefer the nested layout above. It keeps the app root separate from the authored surface and scales better as the project grows.
+
+## Troubleshooting discovery
+
+Run `eve info` to list the discovered surface and print discovery diagnostics. If a file was not picked up, verify that it sits in the correct authored slot per the table above and that the root-vs-subagent boundary is valid. eve also writes inspectable artifacts under `.eve/`.

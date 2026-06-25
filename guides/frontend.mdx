@@ -1,0 +1,375 @@
+---
+title: "Frontend Integration: useEveAgent for React, Vue, Svelte"
+sidebarTitle: "Frontend"
+description: "Connect a browser chat UI to an eve agent using useEveAgent from eve/react, eve/vue, or eve/svelte with Next.js and SvelteKit bundler plugins."
+---
+
+The frontend helpers put a browser chat or agent UI on top of an eve agent without CORS configuration or URL environment variables. `useEveAgent()` opens a durable session, sends turns, streams the reply back, and turns the raw event stream into render-ready state. React is the reference implementation; Vue and Svelte ship the same surface.
+
+## The integration model
+
+A browser UI is a client of the agent's HTTP routes. Two layers wire it up:
+
+- **The framework plugin** mounts the eve routes on your app's origin, so the browser never crosses a CORS boundary or reads an env var to find the agent. Pick yours: `withEve` for Next.js, the `eve/nuxt` module for Nuxt, or the `eveSvelteKit` Vite plugin for SvelteKit.
+- **The hook** (`useEveAgent`) holds the session state, streaming, errors, and composer status. It defaults to same-origin routes such as `/eve/v1/session`.
+
+For scripts, server-to-server calls, evals, or custom clients that don't need framework UI state, use the [TypeScript Client SDK](/guides/client-sdk) directly.
+
+## Next.js setup
+
+`eve/next` ships a Next.js frontend and an eve agent as a single project. Wrap your config with `withEve()` to run both from one dev server and one Vercel deploy.
+
+### Wrap the Next.js config
+
+```ts title="next.config.ts"
+import type { NextConfig } from "next";
+import { withEve } from "eve/next";
+
+const nextConfig: NextConfig = {};
+
+export default withEve(nextConfig);
+```
+
+By default `withEve()` looks for an `agent/` folder inside your Next.js project root. If the agent lives somewhere else, point at it with `eveRoot`:
+
+```ts title="next.config.ts"
+export default withEve(nextConfig, {
+  eveRoot: "../my-agent",
+});
+```
+
+### `withEve` options
+
+| Option | Type | Default | Purpose |
+| ------ | ---- | ------- | ------- |
+| `eveRoot` | `string` | Next.js app root | Path to the eve app root, relative to `process.cwd()` unless absolute |
+| `eveBuildCommand` | `string` | `"eve build"` | Build command for the generated eve Vercel service |
+| `servicePrefix` | `string` | `"/_eve_internal/eve"` | Private Vercel route namespace for the eve service |
+| `devServerTimeoutMs` | `number` | `180000` | Maximum wait for the eve dev server to become available |
+
+### Dev vs deploy topology (Next.js)
+
+- **Local dev.** `npm run dev` boots the eve dev server next to `next dev` and rewrites the eve routes to it. The browser only ever talks to the Next.js origin.
+- **Vercel.** The web app and the eve runtime deploy as a single project on the same site origin.
+- **Local production build.** Run `eve build` first, then `next build && next start`. The preview server proxies eve routes to the built output on a stable local port (`4274`). Override with `EVE_NEXT_PRODUCTION_PORT`.
+- **Non-Vercel hosts.** When the eve service lives on a separate origin, set `EVE_NEXT_PRODUCTION_ORIGIN` at build time.
+
+## SvelteKit setup
+
+`eve/sveltekit` runs a SvelteKit frontend and an eve agent as one project. The `eveSvelteKit()` Vite plugin handles dev and deploy wiring automatically.
+
+### Register the Vite plugin
+
+Add `eveSvelteKit()` **before** `sveltekit()`:
+
+```ts title="vite.config.ts"
+import { sveltekit } from "@sveltejs/kit/vite";
+import { eveSvelteKit } from "eve/sveltekit";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [eveSvelteKit(), sveltekit()],
+});
+```
+
+Pass `eveRoot` when the agent lives outside the SvelteKit project root, or `eveBuildCommand` when the agent needs a project-specific build step:
+
+```ts title="vite.config.ts"
+export default defineConfig({
+  plugins: [
+    eveSvelteKit({
+      eveRoot: "../my-agent",
+      eveBuildCommand: "npm run build:eve",
+    }),
+    sveltekit(),
+  ],
+});
+```
+
+## Basic chat: `useEveAgent`
+
+The hook lives in `eve/react`, `eve/vue`, or `eve/svelte` depending on your framework. Render `data.messages`, gate the composer on `status`, and send text with `send`:
+
+<Tabs>
+  <Tab title="React">
+    ```tsx title="components/Chat.tsx"
+    "use client";
+
+    import { useEveAgent } from "eve/react";
+
+    export function Chat() {
+      const agent = useEveAgent();
+      const isBusy = agent.status === "submitted" || agent.status === "streaming";
+
+      return (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            const message = String(form.get("message") ?? "").trim();
+            if (message.length > 0) {
+              void agent.send({ message });
+            }
+          }}
+        >
+          {agent.data.messages.map((message) => (
+            <article key={message.id}>
+              <header>{message.role}</header>
+              {message.parts.map((part, index) =>
+                part.type === "text" ? <p key={index}>{part.text}</p> : null,
+              )}
+            </article>
+          ))}
+          <input name="message" disabled={isBusy} />
+          <button disabled={isBusy} type="submit">
+            Send
+          </button>
+        </form>
+      );
+    }
+    ```
+  </Tab>
+  <Tab title="Svelte">
+    ```svelte title="components/Chat.svelte"
+    <script lang="ts">
+      import { useEveAgent } from "eve/svelte";
+
+      const agent = useEveAgent();
+      let message = $state("");
+      let isBusy = $derived(agent.status === "submitted" || agent.status === "streaming");
+
+      async function handleSubmit() {
+        const text = message.trim();
+        if (!text || isBusy) return;
+        message = "";
+        await agent.send({ message: text });
+      }
+    </script>
+
+    <form onsubmit={(event) => {
+      event.preventDefault();
+      void handleSubmit();
+    }}>
+      <input bind:value={message} disabled={isBusy} />
+      <button type="submit" disabled={isBusy}>Send</button>
+    </form>
+    ```
+  </Tab>
+</Tabs>
+
+## Returned state
+
+`useEveAgent()` returns the current UI state plus commands:
+
+| Field | What it is |
+| ----- | ---------- |
+| `data` | Projected UI state from the reducer. Defaults to `{ messages }`. |
+| `status` | `"ready"`, `"submitted"`, `"streaming"`, or `"error"`. Drives the composer. |
+| `error` | The last `Error` thrown, if any. |
+| `events` | Raw eve stream events for this session. |
+| `session` | Serializable session cursor (`sessionId`, `continuationToken`, `streamIndex`). |
+| `send` | Send text or the full turn payload (multi-part messages, HITL responses). |
+| `stop` | Abort the active request. |
+| `reset` | Clear local events, data, errors, and the local session cursor. |
+
+`data.messages` follows the AI SDK `UIMessage` convention and drops straight into any AI SDK UI primitive that accepts `UIMessage[]`. Parts include user text, assistant text, reasoning, tool calls, tool results, and input requests.
+
+## Sending attachments and multi-part messages
+
+Pass an object to `send()` for text, multi-part messages, attachments, HITL responses, and per-turn context:
+
+```tsx
+// Plain text
+await agent.send({ message: "Summarize this session." });
+
+// Multi-part with a file attachment
+await agent.send({
+  message: [
+    { type: "text", text: "What is in this file?" },
+    {
+      type: "file",
+      data: fileDataUrl, // base64 data URL
+      mediaType: "application/pdf",
+      filename: "report.pdf",
+    },
+  ],
+});
+```
+
+`status` moves from `ready` → `submitted` → `streaming` → `ready` as the turn progresses. Call `stop()` to abort, and `reset()` to clear local state so the next send starts a fresh durable session.
+
+## Human-in-the-loop prompts
+
+When a tool requests approval or the model asks a question, the stream emits `input.requested`. The pending request rides on a `dynamic-tool` part of the latest message. Read it, then answer through the same session:
+
+```tsx
+const request = agent.data.messages
+  .at(-1)
+  ?.parts.find(
+    (part) =>
+      part.type === "dynamic-tool" && part.toolMetadata?.eve?.inputRequest,
+  )?.toolMetadata?.eve?.inputRequest;
+
+if (request) {
+  await agent.send({
+    inputResponses: [{ requestId: request.requestId, optionId: "approve" }],
+  });
+}
+```
+
+`request.prompt` and `request.options` give you what you need to render the approve and deny UI.
+
+## Attaching page context per turn
+
+`clientContext` adds ephemeral context for the next model call only. It never lands in durable session history and doesn't dispatch a turn by itself:
+
+```tsx
+await agent.send({
+  message: "What should I do on this screen?",
+  clientContext: { route: "/billing", plan: "pro", seatsUsed: 4 },
+});
+```
+
+To attach the same context to every turn, use `prepareSend`. It runs right before each send and returns the (possibly augmented) turn:
+
+```tsx
+const agent = useEveAgent({
+  prepareSend: (input) => ({
+    ...input,
+    clientContext: { route: location.pathname },
+  }),
+});
+```
+
+## Lifecycle callbacks
+
+```tsx
+const agent = useEveAgent({
+  onEvent: (event) => console.debug(event.type),
+  onError: (error) => toast.error(error.message),
+  onFinish: (snapshot) => console.log(snapshot.status),
+});
+```
+
+Two additional options tune turn behavior:
+
+- `optimistic` (default `true`): projects submitted user messages into `data` before eve confirms them.
+- `maxReconnectAttempts` (default `3`): stream reconnection budget per turn.
+
+## Custom reducer
+
+The default reducer projects events into `{ messages }`. Pass a `reducer` implementing `EveAgentReducer<TData>` when you want `data` shaped differently:
+
+```tsx
+import { useEveAgent } from "eve/react";
+import type { EveAgentReducer } from "eve/react";
+
+interface ToolLog {
+  readonly toolCalls: number;
+}
+
+const toolCounter: EveAgentReducer<ToolLog> = {
+  initial: () => ({ toolCalls: 0 }),
+  reduce: (data, event) =>
+    event.type === "actions.requested" ? { toolCalls: data.toolCalls + 1 } : data,
+};
+
+const agent = useEveAgent({ reducer: toolCounter });
+// agent.data is ToolLog
+```
+
+## Resumable sessions
+
+Persist both the rendered event log and the `session` cursor to pick the conversation back up after a reload:
+
+```tsx
+import type { HandleMessageStreamEvent, SessionState } from "eve/client";
+
+type SavedEveChat = {
+  events?: readonly HandleMessageStreamEvent[];
+  session?: SessionState;
+};
+
+const [saved] = useState<SavedEveChat>(() => {
+  const raw = localStorage.getItem("eve-chat");
+  return raw ? JSON.parse(raw) : {};
+});
+
+const agent = useEveAgent({
+  initialEvents: saved.events ?? [],
+  initialSession: saved.session,
+  onFinish(snapshot) {
+    localStorage.setItem(
+      "eve-chat",
+      JSON.stringify({
+        events: snapshot.events,
+        session: snapshot.session,
+      }),
+    );
+  },
+});
+```
+
+Store the full `session` object (`sessionId`, `continuationToken`, `streamIndex`), not a single field. For multiple chat threads, keep one saved event log and session cursor per thread, and remount the chat component when switching — for example with `key={chat.id}`.
+
+## Custom hosts and auth headers
+
+Pass `host` when the eve server isn't same-origin, and `auth` or `headers` when the channel requires credentials. Function values are re-resolved before every request, reconnects included:
+
+```tsx
+const agent = useEveAgent({
+  host: "https://agent.example.com",
+  auth: {
+    bearer: async () => await getAccessToken(),
+  },
+});
+```
+
+For a Next.js app using cookie-based auth (Auth.js or similar), no extra wiring is needed — the browser already sends cookies on every eve request. For non-cookie schemes, attach credentials via `headers`:
+
+```tsx
+const agent = useEveAgent({
+  headers: async () => ({
+    authorization: `Bearer ${await getAccessToken()}`,
+  }),
+});
+```
+
+## Channel auth
+
+The default eve channel is fail-closed. Without an authored `agent/channels/eve.ts`, eve registers `eveChannel({ auth: [localDev(), vercelOidc()] })`: `localDev()` opens routes on localhost, `vercelOidc()` admits Vercel OIDC callers in production, and everything else gets a `401`.
+
+To set your own auth policy, add `agent/channels/eve.ts`:
+
+```ts title="agent/channels/eve.ts"
+import { eveChannel } from "eve/channels/eve";
+import { localDev, vercelOidc } from "eve/channels/auth";
+
+export default eveChannel({ auth: [localDev(), vercelOidc()] });
+```
+
+## Per-framework integration summary
+
+| Framework | Plugin | Hook |
+| --------- | ------ | ---- |
+| Next.js | `withEve` (eve/next) | `useEveAgent` (eve/react) |
+| Nuxt | `eve/nuxt` module | `useEveAgent` (eve/vue) |
+| SvelteKit | `eveSvelteKit` (eve/sveltekit) | `useEveAgent` (eve/svelte) |
+| Any React | same-origin or `host` | `useEveAgent` (eve/react) |
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Client SDK" href="/guides/client-sdk">
+    Lower-level TypeScript SDK for scripts, server code, and evals
+  </Card>
+  <Card title="Deployment" href="/guides/deployment">
+    Ship your eve agent and frontend to Vercel or your own host
+  </Card>
+  <Card title="Channels" href="/channels/overview">
+    The HTTP routes the hook talks to
+  </Card>
+  <Card title="Custom Channels" href="/channels/custom-channels">
+    Build custom channel adapters for your own platform
+  </Card>
+</CardGroup>

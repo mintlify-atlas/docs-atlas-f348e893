@@ -1,0 +1,195 @@
+---
+title: "Sessions, Runs, and Streaming: The Session Contract"
+sidebarTitle: "Sessions & Streaming"
+description: "Continuation tokens vs. session IDs, starting and resuming sessions, the NDJSON event stream, all event types, and how to reconnect."
+---
+
+Every eve app speaks the same stable HTTP API to a [durable session](/reference/execution-model). This page is the contract you hold: the two handles you get back, the events you stream, how to send a follow-up, and how to reconnect after a dropped connection.
+
+## The two handles
+
+Two handles do two different jobs, and mixing them up is the most common mistake.
+
+| Handle | Purpose | Owned by |
+|---|---|---|
+| `continuationToken` | Resume handle — send a follow-up message to the same conversation. | Channel |
+| `sessionId` / `runId` | Stream-and-inspect handle — attach to the event stream and watch a run. | Runtime |
+
+A session has one active continuation at a time. Each follow-up must use the **current** `continuationToken`; a stale token is rejected.
+
+<Warning>
+The `continuationToken` is not a message queue address. Only one active session can own a continuation token, and competing sessions are rejected, not queued. See the [message delivery and queueing](/reference/execution-model#message-delivery-and-queueing) section for the full contract.
+</Warning>
+
+<Note>
+React, Vue, and Svelte apps should reach for `useEveAgent()` instead of calling these routes by hand. Next.js and Nuxt apps can proxy them to the eve runtime from the same origin.
+</Note>
+
+## Start a session
+
+Send a `POST` to `/eve/v1/session` with your first message:
+
+```bash
+curl -X POST http://127.0.0.1:3000/eve/v1/session \
+  -H 'content-type: application/json' \
+  -d '{"message":"Summarize the latest forecast."}'
+```
+
+eve responds right away. The JSON body carries a `sessionId` and a `continuationToken`, and the `x-eve-session-id` header names the durable session to stream.
+
+## Stream a session
+
+Attach to the event stream using the `sessionId` returned when you started the session:
+
+```bash
+curl http://127.0.0.1:3000/eve/v1/session/<sessionId>/stream
+```
+
+The stream is newline-delimited JSON (NDJSON) — one event per line. Each line is a self-contained JSON object you can parse and act on independently.
+
+## Event type reference
+
+| Event | Meaning |
+|---|---|
+| `session.started` | A durable session was created. |
+| `turn.started` | A new turn began. |
+| `message.received` | An inbound user message was accepted. |
+| `step.started` | A model step began. |
+| `actions.requested` | The model requested tool calls. |
+| `action.result` | A tool call returned. |
+| `input.requested` | The run paused for human input (HITL approval or `ask_question`); carries `requests`. |
+| `subagent.called` | A subagent was delegated; carries `childSessionId` to attach to. |
+| `subagent.completed` | A delegated subagent finished. |
+| `reasoning.appended` | A reasoning delta — incremental, with cumulative text so far. |
+| `reasoning.completed` | The finalized reasoning block. |
+| `message.appended` | An assistant text delta — incremental, with cumulative text so far. |
+| `message.completed` | A finalized assistant text block. |
+| `result.completed` | The finalized structured result for a turn that requested an output schema; carries `result`. |
+| `compaction.requested` | Context-window compaction began; carries `modelId`, `sessionId`, `turnId`, `usageInputTokens`. |
+| `compaction.completed` | A compaction checkpoint was written to durable history. |
+| `authorization.required` | A connection needs OAuth; carries `name`, `description`, and an `authorization` challenge. |
+| `authorization.completed` | A connection's authorization resolved; carries `outcome`. |
+| `step.completed` | A model step finished; carries `finishReason` and usage. |
+| `step.failed` | A model step failed; carries `{ code, message, details? }`. |
+| `turn.completed` | The turn finished. |
+| `turn.failed` | The turn failed; carries `{ code, message, details? }`. |
+| `session.waiting` | The session parked, waiting for the next input (a message or an answer). |
+| `session.failed` | The session failed. |
+| `session.completed` | The session reached a terminal end. |
+
+### Live-streaming events: `reasoning.appended` and `message.appended`
+
+`reasoning.appended` and `message.appended` stream deltas as they arrive. Each event carries both the new delta and the cumulative text for the current block. The finalized block then appears on `message.completed` and `reasoning.completed` — these are the compatibility path for clients that don't render incremental streaming.
+
+<Note>
+Consider the privacy, confidentiality, and user-experience implications before displaying, storing, or transmitting `reasoning.appended` events in your application. Reasoning content may include intermediate thoughts not intended for end-user display.
+</Note>
+
+`message.completed` can fire more than once in a turn — the agent often emits interim assistant text before a tool call. To distinguish tool-call narration from a terminal reply, check `message.completed.data.finishReason`. The `step.completed.data.finishReason` field mirrors the step outcome, and usage data lives on `step.completed`.
+
+### Subagent events
+
+A delegated subagent publishes its own progress on a child-session stream. The parent session only emits `subagent.called` with a `childSessionId`, which a client uses to attach to the child stream independently.
+
+### Error events
+
+`step.failed` and `turn.failed` each carry `{ code, message, details? }` for the failed fragment or turn. `session.failed` is the terminal session-level variant.
+
+### OAuth authorization events
+
+`authorization.required` carries the sign-in challenge — `data.authorization` may include `url`, `userCode`, `expiresAt`, and `instructions`. `authorization.completed` carries `data.outcome`, which is one of:
+
+```text
+"authorized" | "declined" | "failed" | "timed-out"
+```
+
+### Structured result events
+
+When a turn requested an output schema, the finalized payload lands on `result.completed` as `data.result`, before the turn boundary events.
+
+## Send a follow-up message
+
+Wait for `session.waiting` before sending a follow-up. Then `POST` to the session endpoint with the stored continuation token:
+
+```bash
+curl -X POST http://127.0.0.1:3000/eve/v1/session/<sessionId> \
+  -H 'content-type: application/json' \
+  -d '{"continuationToken":"<token>","message":"Now send the short version."}'
+```
+
+The follow-up reuses the same durable session: same history, same state.
+
+<Steps>
+  <Step title="Start the session">
+    POST to `/eve/v1/session` with the first message. Save the `continuationToken` and `sessionId` from the response.
+  </Step>
+  <Step title="Attach to the stream">
+    GET `/eve/v1/session/<sessionId>/stream` and process NDJSON events as they arrive.
+  </Step>
+  <Step title="Wait for session.waiting">
+    Only send the next message after `session.waiting` fires. This ensures deterministic ordering.
+  </Step>
+  <Step title="POST the follow-up">
+    POST to `/eve/v1/session/<sessionId>` with the current `continuationToken` and your next message. The token from the response replaces the previous one.
+  </Step>
+</Steps>
+
+<Warning>
+Always wait for `session.waiting` before sending the next message. Sending concurrent messages to the same session does not behave like a chat queue — see [message delivery and queueing](/reference/execution-model#message-delivery-and-queueing) for details.
+</Warning>
+
+## Reconnecting to a stream
+
+The stream is durable. Every event is recorded before a step completes, so the entire stream is replayable. Pass `startIndex` to reconnect by event count and pick up from where you dropped off, or rewind to the start:
+
+```bash
+curl "http://127.0.0.1:3000/eve/v1/session/<sessionId>/stream?startIndex=<count>"
+```
+
+This means you can safely reconnect after a network drop without missing events, as long as you tracked the last index you received.
+
+## Inspect the agent
+
+`GET /eve/v1/info` returns a JSON inspection snapshot for the running agent — model, instructions, authored and framework tools, skills, channels, schedules, subagents, sandbox, connections, hooks, workflow, and workspace metadata:
+
+```bash
+curl http://127.0.0.1:3000/eve/v1/info
+```
+
+The route uses the same default auth chain as the eve channel. Locally it answers anonymously; a deployed Vercel target requires a valid OIDC bearer, with a same-project bypass for in-deployment callers.
+
+## Event dispatch order
+
+Every stream event triggers four steps in this order:
+
+<Steps>
+  <Step title="Channel handler">
+    The channel's event handler runs and can mutate adapter state.
+  </Step>
+  <Step title="Metadata projection">
+    The framework re-evaluates the channel's `metadata(state)` and stores the result.
+  </Step>
+  <Step title="Hooks">
+    Authored hooks subscribed to the event fire.
+  </Step>
+  <Step title="Dynamic resolvers">
+    Dynamic tool, skill, and instruction resolvers fire. `ctx.channel.metadata` already holds the freshly projected metadata from step 2.
+  </Step>
+</Steps>
+
+The order is structural, not incidental. By the time a resolver or hook reads channel metadata, the channel has already updated its state and the projection is current.
+
+<CardGroup cols={2}>
+  <Card title="Execution Model" href="/reference/execution-model">
+    What makes a session durable and how parked work resumes.
+  </Card>
+  <Card title="Security Model" href="/reference/security-model">
+    Trust boundaries, route auth, and channel verification.
+  </Card>
+  <Card title="Context Control" href="/reference/context-control">
+    Managing what the model sees across instructions and skills.
+  </Card>
+  <Card title="TypeScript SDK" href="/guides/client-sdk">
+    Call these routes from scripts and server-side code with a typed client.
+  </Card>
+</CardGroup>

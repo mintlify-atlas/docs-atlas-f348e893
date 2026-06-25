@@ -1,0 +1,152 @@
+---
+title: "Schedules: Trigger Your eve Agent on a Cron Schedule"
+sidebarTitle: "Schedules"
+description: "Use defineSchedule from eve/schedules to fire your agent on a cron expression — as a fire-and-forget prompt or a handler that dispatches to a channel."
+---
+
+A schedule starts the agent on its own clock instead of waiting for an inbound message. Use one for daily digests, data syncs, cleanup sweeps, heartbeats, or anything that should fire on a cadence. Each schedule is a single file under `agent/schedules/` carrying a cron expression.
+
+Schedules are **root-only** — declared subagents cannot have a `schedules/` directory.
+
+The schedule name comes from the path under `schedules/`. For example, `agent/schedules/billing/sweep.ts` becomes `"billing/sweep"`. Nested directories are fine.
+
+## `defineSchedule`
+
+Every schedule provides a `cron` and exactly one of `markdown` (fire-and-forget prompt) or `run` (handler with full control):
+
+```ts
+interface ScheduleDefinition {
+  cron: string;
+  markdown?: string; // fire-and-forget prompt (task mode)
+  run?: (args: ScheduleHandlerArgs) => Promise<void> | void; // handler
+}
+
+interface ScheduleHandlerArgs {
+  receive: CrossChannelReceiveFn; // hand the work off to a channel
+  waitUntil: (task: Promise<unknown>) => void; // keep the cron task alive past return
+  appAuth: SessionAuthContext; // pre-built app principal
+}
+```
+
+`defineSchedule` is a type-level pass-through. The TypeScript compiler enforces the `markdown`-or-`run` one-of rule.
+
+`cron` is a standard 5-field string (`minute hour day-of-month month day-of-week`) with minute granularity. On Vercel, each schedule becomes a Vercel Cron Job, and Vercel evaluates the expression in **UTC**, so `"0 9 * * 1-5"` fires at 09:00 UTC on weekdays.
+
+<Note>
+`eve dev` never fires schedules on their cron cadence. A built app served with `eve start` does run production scheduled tasks. To trigger a schedule while iterating in dev, use the dispatch route described below.
+</Note>
+
+## Markdown form (fire-and-forget)
+
+This is the minimal schedule. eve runs the agent on the prompt and throws away the output — though the agent can still call tools, write to backends, and log along the way. This is called **task mode**. A task-mode session runs to completion or fails, and cannot park to wait for a person or an OAuth sign-in.
+
+```ts title="agent/schedules/heartbeat.ts"
+import { defineSchedule } from "eve/schedules";
+
+export default defineSchedule({
+  cron: "*/5 * * * *",
+  markdown: "Pull open Linear issues and POST a summary to the metrics endpoint.",
+});
+```
+
+You can write the same thing as a plain `.md` file: its frontmatter takes `cron` and nothing else, and the body is the prompt.
+
+```md title="agent/schedules/cleanup.md"
+---
+cron: "0 0 * * 0"
+---
+
+Sweep stale workflow state.
+```
+
+## Handler form (`run`)
+
+Use a handler when the schedule needs to deliver to a channel, branch on conditions, or compute its arguments at fire time. The handler is in full control; it has no channel of its own, so it passes the work to one with `receive`.
+
+```ts title="agent/schedules/critical-alerts.ts"
+import { defineSchedule } from "eve/schedules";
+
+import slack from "../channels/slack.js";
+
+export default defineSchedule({
+  cron: "* * * * *",
+  async run({ receive, waitUntil, appAuth }) {
+    waitUntil(
+      receive(slack, {
+        message: "Check for new critical alerts. Report only when there are any.",
+        target: { channelId: "C0123ABC" },
+        auth: appAuth,
+      }),
+    );
+  },
+});
+```
+
+The agent doesn't have to deliver a message on every run. When a prompt makes delivery conditional — as in the alert check above — eve tells the agent how to finish successfully without sending anything. Frequent polling schedules don't need a separate filter or delivery setting.
+
+### Handler args
+
+| Arg | What it does |
+| --- | ------------ |
+| `receive(channel, { message, target, auth })` | Starts a session on another channel. Same contract as a route handler's `args.receive`. |
+| `waitUntil(promise)` | Extends the cron task's lifetime so the parked session and any in-flight fetches settle before the task ends. Wrap the `receive` call in it. |
+| `appAuth` | The app principal (`{ authenticator: "app", principalId: "eve:app", principalType: "runtime" }`). Pass it as `receive(..., { auth: appAuth })` for work the agent does on its own behalf. |
+
+A handler-form session runs on the same durable runtime engine as any other session, so it can park (durably suspend) — for instance when the channel handoff is waiting for a Slack reply. Only markdown task mode is barred from waiting.
+
+## Trigger a schedule during dev
+
+The dev server mounts a one-shot dispatch route that fires a schedule by name, out of band, exactly once:
+
+```sh
+curl -X POST http://localhost:3000/eve/v1/dev/schedules/heartbeat
+# -> { "scheduleId": "heartbeat", "sessionIds": ["..."] }
+```
+
+`:scheduleId` is the path-derived schedule name (`agent/schedules/heartbeat.ts` → `heartbeat`; URL-encode the `/` in nested names). It returns the started session ids as JSON, so you can subscribe to each session's stream at `GET /eve/v1/session/:sessionId/stream`. An unknown id comes back `404` with `availableScheduleIds` listing the schedules the app defines.
+
+<Warning>
+The dispatch route is dev-only. Production builds never mount it, and it needs no auth since the dev server is local-only.
+</Warning>
+
+## On Vercel
+
+Hosted Vercel builds turn every `defineSchedule(...)` into a Vercel Cron Job, with each `cron` written as an entry in `.vercel/output/config.json`. Vercel evaluates all expressions in UTC.
+
+Confirm discovery under **Settings → Cron Jobs** and watch execution history under **Observability → Cron Jobs**. Per-run logs land under **Observability → Logs**.
+
+## Self-deployed hosts
+
+Production builds register schedules as Nitro scheduled tasks. On Vercel, Nitro's Vercel preset wires those task registrations into Vercel Cron automatically. Outside Vercel, the standard `eve build && eve start` path serves Nitro's Node output and starts Nitro's schedule runner, so tasks fire on their cron cadence while the process is running.
+
+<Warning>
+If you adapt the generated output to a process manager or container platform that only serves HTTP and doesn't start Nitro's scheduled task runner, the schedule definitions still compile, but they won't fire automatically. In that case, run eve through `eve start`, use a host that supports Nitro scheduled tasks, or trigger the work from your own scheduler through an authenticated route.
+</Warning>
+
+## File structure
+
+```text
+agent/
+└── schedules/
+    ├── heartbeat.ts          # name: "heartbeat"
+    ├── cleanup.md            # name: "cleanup"
+    └── billing/
+        └── sweep.ts          # name: "billing/sweep"
+```
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Channels" href="/channels/overview">
+    Deliver schedule output to users via channels
+  </Card>
+  <Card title="Deployment" href="/guides/deployment">
+    How Vercel Cron and self-hosted schedule runners are wired
+  </Card>
+  <Card title="Hooks" href="/guides/hooks">
+    React to session lifecycle events triggered by schedule runs
+  </Card>
+  <Card title="State" href="/guides/state">
+    Persist data across turns within a scheduled session
+  </Card>
+</CardGroup>

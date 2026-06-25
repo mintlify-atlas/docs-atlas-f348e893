@@ -1,0 +1,536 @@
+---
+title: "Platform Channels: Slack, Discord, Teams, and More"
+sidebarTitle: "Platform Channels"
+description: "Set up Slack, Discord, Teams, Telegram, Twilio, GitHub, and the eve HTTP channel with minimal code, env vars, and key configuration options."
+---
+
+eve ships first-class channel adapters for the most common platforms. Each channel handles signature verification, event parsing, delivery, human-in-the-loop (HITL) rendering, and proactive messaging for its surface. Pick the tab for the platform you want to wire up.
+
+<Note>
+  All channel files live under `agent/channels/`. The file stem becomes the
+  channel id. Export the channel definition as the module's default export.
+</Note>
+
+<Tabs>
+  <Tab title="eve (HTTP)">
+
+## eve HTTP Channel
+
+The eve channel is the framework's default HTTP session API. It exposes session routes the terminal UI, [`useEveAgent`](/guides/frontend), and any HTTP client can call. It is **active by default** — no file is needed. Add `agent/channels/eve.ts` only to override auth or add hooks.
+
+**Import path:** `eve/channels/eve`
+
+### Minimal setup
+
+```ts title="agent/channels/eve.ts"
+import { eveChannel } from "eve/channels/eve";
+import { localDev, vercelOidc } from "eve/channels/auth";
+
+export default eveChannel({
+  auth: [localDev(), vercelOidc()],
+});
+```
+
+### Routes
+
+| Method | Path                              | Description                      |
+| ------ | --------------------------------- | -------------------------------- |
+| `GET`  | `/eve/v1/health`                  | Health check                     |
+| `POST` | `/eve/v1/session`                 | Start a new session              |
+| `POST` | `/eve/v1/session/:sessionId`      | Send a follow-up message         |
+| `GET`  | `/eve/v1/session/:sessionId/stream` | Stream events (NDJSON)         |
+
+### Quick curl test
+
+```bash
+# Start a session
+curl -X POST https://<deployment>/eve/v1/session \
+  -H "Content-Type: application/json" \
+  -d '{"message":"What is the weather in Paris?"}'
+# {"continuationToken":"eve:7f3c...","ok":true,"sessionId":"ses_01h..."}
+
+# Stream events
+curl -N https://<deployment>/eve/v1/session/ses_01h.../stream
+```
+
+### Auth helpers
+
+| Helper            | When to use                                                                   |
+| ----------------- | ----------------------------------------------------------------------------- |
+| `localDev()`      | Accepts requests during local development                                      |
+| `vercelOidc()`    | Allows the local CLI and other Vercel-issued deployment tokens                |
+| `placeholderAuth()` | Returns a 401 with setup guidance in production until replaced with real auth |
+
+<Warning>
+  Neither `localDev()` nor `vercelOidc()` admits browser users or external
+  clients in production. For a public app, wire the channel to your own auth
+  (Clerk, Auth.js, OIDC/JWT verification, or an API-key verifier).
+</Warning>
+
+### Customization with `onMessage` and `events`
+
+```ts title="agent/channels/eve.ts"
+import { eveChannel, defaultEveAuth } from "eve/channels/eve";
+import { localDev, vercelOidc } from "eve/channels/auth";
+
+export default eveChannel({
+  auth: [localDev(), vercelOidc()],
+  onMessage(ctx, message) {
+    const callerId = ctx.eve.caller?.principalId ?? "anonymous";
+    return {
+      auth: defaultEveAuth(ctx),
+      context: [`HTTP caller ${callerId} sent: ${message}`],
+    };
+  },
+  events: {
+    "message.completed"(eventData, channel, ctx) {
+      console.log("eve response completed", {
+        continuationToken: channel.continuationToken,
+        sessionId: ctx.session.id,
+      });
+    },
+  },
+});
+```
+
+  </Tab>
+  <Tab title="Slack">
+
+## Slack
+
+The Slack channel answers `@mentions` and DMs, replies in threads, shows typing indicators, and turns HITL prompts into buttons. Credentials run through [Vercel Connect](https://vercel.com/docs/connect), so there is no `SLACK_BOT_TOKEN` or `SLACK_SIGNING_SECRET` for you to manage.
+
+**Import path:** `eve/channels/slack`
+
+### 1. Set up Vercel Connect
+
+```bash
+npm install -g vercel@latest && export FF_CONNECT_ENABLED=1
+vercel connect create slack --triggers
+vercel connect detach <uid> --yes
+vercel connect attach <uid> --triggers --trigger-path /eve/v1/slack --yes
+```
+
+`--triggers` enables Slack Event Subscriptions. Without it, Slack never delivers `app_mention` or `message.im` events.
+
+### 2. Install the dependency and add the channel
+
+```bash
+npm install @vercel/connect
+```
+
+```ts title="agent/channels/slack.ts"
+import { connectSlackCredentials } from "@vercel/connect/eve";
+import { slackChannel } from "eve/channels/slack";
+
+export default slackChannel({
+  credentials: connectSlackCredentials("slack/my-agent"),
+});
+```
+
+### 3. Deploy
+
+```bash
+VERCEL_USE_EXPERIMENTAL_FRAMEWORKS=1 vercel deploy --prod
+```
+
+### Loading thread context
+
+Pull prior replies into the model's history with `loadThreadContextMessages`. Use `since: "last-agent-reply"` to avoid re-injecting messages the model already saw:
+
+```ts title="agent/channels/slack.ts"
+import {
+  defaultSlackAuth,
+  loadThreadContextMessages,
+  slackChannel,
+} from "eve/channels/slack";
+import { connectSlackCredentials } from "@vercel/connect/eve";
+
+export default slackChannel({
+  credentials: connectSlackCredentials("slack/my-agent"),
+  async onAppMention(ctx, message) {
+    const auth = defaultSlackAuth(message, ctx);
+    const prior = await loadThreadContextMessages(ctx.thread, message, {
+      since: "last-agent-reply",
+    });
+    if (prior.length === 0) return { auth };
+    const transcript = prior
+      .map((m) => `${m.isMe ? "you" : (m.user ?? "user")}: ${m.markdown}`)
+      .join("\n");
+    return {
+      auth,
+      context: [`Recent thread messages since your last reply:\n\n${transcript}`],
+    };
+  },
+});
+```
+
+### Key configuration options
+
+| Option           | Description                                                                         |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| `credentials`    | `connectSlackCredentials(uid)` — supplies `botToken` and `webhookVerifier` via Connect |
+| `onAppMention`   | Handles `app_mention` events; return `{ auth }` to dispatch, `null` to drop        |
+| `onDirectMessage`| Handles `message.im` events (requires `im:history` scope)                          |
+| `onInteraction`  | Handles `block_actions` callbacks not consumed by HITL                              |
+| `events`         | Observe session events (e.g. `message.completed`, `authorization.required`)         |
+
+  </Tab>
+  <Tab title="Discord">
+
+## Discord
+
+The Discord channel handles HTTP Interactions — slash commands, message components, and modal submissions. Discord enforces a 3-second ACK deadline; the channel verifies the Ed25519 signature, acknowledges immediately, and runs the agent in the background.
+
+**Import path:** `eve/channels/discord`
+
+### Minimal setup
+
+```ts title="agent/channels/discord.ts"
+import { discordChannel } from "eve/channels/discord";
+
+export default discordChannel();
+```
+
+### Required environment variables
+
+```bash
+DISCORD_PUBLIC_KEY=...      # verifies X-Signature-Ed25519 + X-Signature-Timestamp
+DISCORD_APPLICATION_ID=...  # edits the deferred response and sends followups
+DISCORD_BOT_TOKEN=...       # proactive messages, fallback, and typing indicators
+```
+
+You can skip env vars by passing `credentials: { applicationId, botToken, publicKey }` directly. Paste the public route URL (`POST /eve/v1/discord`) into your Discord application's **Interactions Endpoint URL** field.
+
+### Register a slash command
+
+```bash
+curl -X PUT \
+  "https://discord.com/api/v10/applications/$DISCORD_APPLICATION_ID/commands" \
+  -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "name": "ask",
+    "description": "Ask the eve agent",
+    "type": 1,
+    "options": [{
+      "name": "message",
+      "description": "What should the agent do?",
+      "type": 3,
+      "required": true
+    }]
+  }]'
+```
+
+<Tip>
+  Use guild commands during development for faster propagation than global
+  commands.
+</Tip>
+
+### Customizing dispatch and delivery
+
+```ts title="agent/channels/discord.ts"
+import { discordChannel } from "eve/channels/discord";
+
+export default discordChannel({
+  onCommand: (ctx, interaction) => ({
+    auth: {
+      principalId: interaction.user.id,
+      principalType: "user",
+      authenticator: "discord",
+      attributes: {
+        channel_id: interaction.channelId,
+        guild_id: interaction.guildId ?? "",
+      },
+    },
+  }),
+  events: {
+    "message.completed"(eventData, channel, ctx) {
+      if (eventData.finishReason === "tool-calls") return;
+      if (eventData.message) channel.discord.post(eventData.message);
+    },
+  },
+});
+```
+
+### Key configuration options
+
+| Option       | Description                                                                  |
+| ------------ | ---------------------------------------------------------------------------- |
+| `credentials`| Inline `{ applicationId, botToken, publicKey }` (alternative to env vars)   |
+| `onCommand`  | Decides dispatch and auth; return `{ auth }` to proceed, `null` to drop     |
+| `events`     | Observe session events; `channel.discord` exposes platform API handles       |
+
+  </Tab>
+  <Tab title="Teams">
+
+## Microsoft Teams
+
+The Teams channel runs your agent inside Microsoft Teams as a bot. It validates Bot Framework JWT tokens on every activity POST and routes message activities to the agent. HITL prompts render as Adaptive Cards.
+
+**Import path:** `eve/channels/teams`
+
+### Minimal setup
+
+```ts title="agent/channels/teams.ts"
+import { teamsChannel } from "eve/channels/teams";
+
+export default teamsChannel();
+```
+
+### Required environment variables
+
+```bash
+MICROSOFT_APP_ID=...
+MICROSOFT_APP_PASSWORD=...
+MICROSOFT_TENANT_ID=...   # optional — single-tenant bots only
+```
+
+The channel mounts at `POST /eve/v1/teams` by default. Point your Azure Bot or Teams app **Messaging endpoint** at that public URL. Override the mount path with `route: "/api/teams/activity"`.
+
+### Customizing dispatch
+
+The default `onMessage` handles personal-chat messages and channel/group messages that mention the bot. Override it for custom logic:
+
+```ts title="agent/channels/teams.ts"
+import { defaultTeamsAuth, teamsChannel } from "eve/channels/teams";
+
+export default teamsChannel({
+  onMessage(ctx, message) {
+    if (message.scope !== "personal" && !message.isBotMentioned) return null;
+    return { auth: defaultTeamsAuth(message) };
+  },
+});
+```
+
+### File attachments (opt-in)
+
+```ts title="agent/channels/teams.ts"
+export default teamsChannel({
+  files: { enabled: true, allowedHosts: ["contoso.sharepoint.com"] },
+});
+```
+
+### Key configuration options
+
+| Option       | Description                                                                    |
+| ------------ | ------------------------------------------------------------------------------ |
+| `route`      | Override the default mount path (`/eve/v1/teams`)                              |
+| `onMessage`  | Decides dispatch and auth; return `{ auth }` to proceed, `null` to drop        |
+| `onInvoke`   | Handles non-HITL invoke activities                                             |
+| `files`      | `{ enabled, allowedHosts }` — opt in to personal-scope downloads               |
+| `events`     | Observe session events                                                         |
+
+  </Tab>
+  <Tab title="Telegram">
+
+## Telegram
+
+The Telegram channel puts your agent behind a Telegram bot. It validates the `X-Telegram-Bot-Api-Secret-Token` header on every webhook request, dispatches private chats and addressed group messages, and replies via `sendMessage`.
+
+**Import path:** `eve/channels/telegram`
+
+### Minimal setup
+
+```ts title="agent/channels/telegram.ts"
+import { telegramChannel } from "eve/channels/telegram";
+
+export default telegramChannel({
+  botUsername: "my_bot",
+});
+```
+
+### Required environment variables
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:...        # replies, typing, callbacks, proactive sends
+TELEGRAM_WEBHOOK_SECRET_TOKEN=...    # must match the secret_token you register
+```
+
+You can pass the same values via `credentials: { botToken, webhookSecretToken }`. The channel mounts at `POST /eve/v1/telegram`. Register the webhook yourself — eve does not call `setWebhook`:
+
+```bash
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://your-app.example.com/eve/v1/telegram",
+    "secret_token": "'"$TELEGRAM_WEBHOOK_SECRET_TOKEN"'",
+    "allowed_updates": ["message", "callback_query"]
+  }'
+```
+
+### File attachments (opt-in)
+
+```ts title="agent/channels/telegram.ts"
+export default telegramChannel({
+  botUsername: "my_bot",
+  uploadPolicy: {
+    allowedMediaTypes: ["image/*", "application/pdf"],
+    maxBytes: 10 * 1024 * 1024,
+  },
+});
+```
+
+### Key configuration options
+
+| Option         | Description                                                                    |
+| -------------- | ------------------------------------------------------------------------------ |
+| `botUsername`  | Required for group-mention dispatch (e.g. `"my_bot"`)                          |
+| `credentials`  | Inline `{ botToken, webhookSecretToken }` (alternative to env vars)            |
+| `onMessage`    | Customize dispatch and auth filtering                                          |
+| `uploadPolicy` | `{ allowedMediaTypes, maxBytes }` — enable inbound photo/document uploads      |
+| `events`       | Observe session events; `channel.telegram` exposes platform handles            |
+
+  </Tab>
+  <Tab title="Twilio">
+
+## Twilio
+
+The Twilio channel puts your agent on a phone number. Inbound SMS arrives as a webhook. Inbound calls are answered with TwiML `<Gather input="speech">` and the transcript feeds the same session, so a caller and a texter look identical downstream. Every request is verified against `X-Twilio-Signature`.
+
+**Import path:** `eve/channels/twilio`
+
+### Minimal setup
+
+```ts title="agent/channels/twilio.ts"
+import { twilioChannel } from "eve/channels/twilio";
+
+export default twilioChannel({
+  allowFrom: "+15551234567",
+  messaging: { from: "+15557654321" },
+});
+```
+
+### Required environment variables
+
+```bash
+TWILIO_ACCOUNT_SID=AC...   # required for default outbound SMS
+TWILIO_AUTH_TOKEN=...      # required for inbound signature verification
+```
+
+Pass the same values via `credentials: { accountSid, authToken }` to skip env vars. The channel mounts three routes:
+
+| Route                                  | Description                    |
+| -------------------------------------- | ------------------------------ |
+| `POST /eve/v1/twilio/messages`         | Messaging (SMS/MMS) webhook    |
+| `POST /eve/v1/twilio/voice`            | Inbound call webhook           |
+| `POST /eve/v1/twilio/voice/transcription` | Speech transcript callback  |
+
+### Dispatch: `allowFrom`
+
+`allowFrom` is required. It gates who can reach the inbound hooks. Pass a single number, a list, an async resolver, or `"*"` (wildcard — use only with an explicit check inside `onText`/`onVoice`):
+
+```ts title="agent/channels/twilio.ts"
+export default twilioChannel({
+  allowFrom: ["+15551234567", "+15557654321"],
+  onText: (ctx, message) => ({
+    auth: {
+      principalId: message.from,
+      principalType: "user",
+      authenticator: "twilio",
+      attributes: { to: message.to ?? "" },
+    },
+  }),
+});
+```
+
+<Warning>
+  SMS and voice have no native button or card affordance, so HITL prompts do
+  not render as interactive controls. Handle `events["input.requested"]`
+  manually by sending the prompt as text and mapping replies back yourself.
+</Warning>
+
+### Key configuration options
+
+| Option                      | Description                                                              |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `allowFrom`                 | Required — number, array, async resolver, or `"*"`                       |
+| `messaging.from`            | Outbound sender number (required for proactive sends)                    |
+| `messaging.messagingServiceSid` | Alternative to `messaging.from` for Messaging Service pools          |
+| `credentials`               | Inline `{ accountSid, authToken }` (alternative to env vars)             |
+| `onText`                    | Customize SMS dispatch and auth                                          |
+| `onVoice`                   | Fires on call start; return `null` to reject or object to customize TwiML |
+| `webhookUrl`                | Set when behind a proxy so signature verification matches the configured URL |
+| `publicBaseUrl`             | Set so voice TwiML can build absolute callback URLs                      |
+
+  </Tab>
+  <Tab title="GitHub">
+
+## GitHub
+
+The GitHub channel lets the agent work directly on a repository. Someone `@mentions` it in an issue, PR, or review comment, and the agent answers in the thread with the PR diff already in context and the repo checked out into the sandbox.
+
+**Import path:** `eve/channels/github`
+
+### Minimal setup
+
+```ts title="agent/channels/github.ts"
+import { githubChannel } from "eve/channels/github";
+
+export default githubChannel({
+  botName: "my-agent",
+  credentials: {
+    appId: process.env.GITHUB_APP_ID,
+    privateKey: process.env.GITHUB_APP_PRIVATE_KEY,
+    webhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
+  },
+});
+```
+
+### Required environment variables
+
+```bash
+GITHUB_APP_ID=...            # GitHub App id
+GITHUB_APP_PRIVATE_KEY=...   # GitHub App private key (PEM)
+GITHUB_WEBHOOK_SECRET=...    # verifies the webhook signature
+GITHUB_APP_SLUG=...          # supplies botName when not set in config
+```
+
+Every `credentials` field also accepts a lazy resolver function for on-demand fetching. Point the GitHub App webhook URL at `https://<deployment>/eve/v1/github`. Subscribe to `issue_comment` and `pull_request_review_comment` for mention-driven turns.
+
+### Opt-in hooks for CI and lifecycle events
+
+```ts title="agent/channels/github.ts"
+import { defaultGitHubAuth, githubChannel } from "eve/channels/github";
+
+export default githubChannel({
+  botName: "my-agent",
+  onComment: (ctx, comment) => ({ auth: defaultGitHubAuth(ctx) }),
+  onIssue: (ctx, issue) =>
+    issue.action === "opened" ? { auth: defaultGitHubAuth(ctx) } : null,
+  onPullRequest: (ctx, pr) =>
+    pr.action === "opened" ? { auth: defaultGitHubAuth(ctx) } : null,
+  onCheckSuite: (ctx, suite) =>
+    suite.action === "completed" &&
+    suite.conclusion === "failure" &&
+    suite.app.slug === "github-actions" &&
+    suite.pullRequests.length > 0
+      ? {
+          auth: defaultGitHubAuth(ctx),
+          context: [
+            `Triage failed check suite ${suite.checkSuiteId} at ${suite.headSha}.`,
+          ],
+        }
+      : null,
+});
+```
+
+### PR context and sandbox checkout
+
+Every PR-triggered turn automatically gets the diff in context. Before the first model call, the channel checks out the relevant ref into the sandbox so `read_file`, `glob`, `grep`, and `bash` all run against the real tree.
+
+### Key configuration options
+
+| Option                         | Description                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------- |
+| `botName`                      | The `@mention` handle that triggers dispatch                                      |
+| `credentials`                  | `{ appId, privateKey, webhookSecret }` — each can be a lazy resolver              |
+| `onComment`                    | Handles `issue_comment` and `pull_request_review_comment` events                  |
+| `onIssue`                      | Opt-in handler for `issues` events                                                |
+| `onPullRequest`                | Opt-in handler for `pull_request` events                                          |
+| `onCheckSuite`                 | Opt-in handler for `check_suite` events                                           |
+| `progress.reactions`           | Set to `false` to suppress the `eyes` reaction on dispatch                        |
+| `pullRequestContext.excludedFiles` | Extend the skip list for large generated files                               |
+
+  </Tab>
+</Tabs>

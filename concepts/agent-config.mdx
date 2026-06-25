@@ -1,0 +1,134 @@
+---
+title: "Agent Config: defineAgent Options in agent.ts"
+sidebarTitle: "Agent Config"
+description: "Configure your eve agent's model, compaction threshold, output schema, and experimental workflow world with the defineAgent helper."
+---
+
+Every eve agent can declare its runtime configuration in `agent.ts` using the `defineAgent` helper imported from `'eve'`. This one file controls which language model the agent uses, how compaction works as the context window fills, and advanced settings like structured output schemas and self-hosted workflow worlds. The root `agent.ts` is optional — when it is absent, eve uses `anthropic/claude-sonnet-4.6` by default — but when it is present, `model` is required.
+
+## Setting the model
+
+### Gateway model string
+
+The simplest config passes a gateway model ID string. eve routes the request through the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway):
+
+```ts agent/agent.ts
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+});
+```
+
+### Direct provider object
+
+To call a provider directly and configure the model in code, pass a provider-authored `LanguageModel` from an AI SDK provider package. Install the provider package first, then set that provider's API key in your environment:
+
+```bash
+npm install @ai-sdk/anthropic
+```
+
+```ts agent/agent.ts
+import { anthropic } from "@ai-sdk/anthropic";
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: anthropic("claude-opus-4.8"),
+});
+```
+
+<Note>
+A fresh `eve init` app includes the core `ai` package but does not install every provider package. Install the specific provider package you import.
+</Note>
+
+## Model options
+
+Pass `modelOptions` to forward provider option overrides to the model call. This covers settings such as temperature, max tokens, and any other `AgentModelOptionsDefinition` fields:
+
+```ts agent/agent.ts
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+  modelOptions: {
+    temperature: 0.2,
+    maxTokens: 4096,
+  },
+});
+```
+
+## Compaction
+
+Compaction summarizes older turns as the agent approaches its context window limit. It is on by default. The only reason to tune it is to control when it kicks in. Lower `thresholdPercent` to compact sooner:
+
+```ts agent/agent.ts
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+  compaction: {
+    thresholdPercent: 0.75, // default is 0.9
+  },
+});
+```
+
+## Structured output with outputSchema
+
+Set `outputSchema` to give a subagent, schedule, or remote job a structured return type. Interactive conversation turns ignore it unless the client supplies a per-message schema:
+
+```ts agent/subagents/researcher/agent.ts
+import { defineAgent } from "eve";
+import { z } from "zod";
+
+export default defineAgent({
+  description: "Research a topic and return a structured summary.",
+  model: "anthropic/claude-opus-4.8",
+  outputSchema: z.object({
+    summary: z.string(),
+    sources: z.array(z.string()),
+  }),
+});
+```
+
+## Workflow world (self-hosted)
+
+By default, eve selects the Workflow SDK world automatically: Vercel Workflow on Vercel, and the SDK's local world in local development or `eve start`. Advanced self-hosted deployments can select the Workflow world package from the root `agent.ts`:
+
+```ts agent/agent.ts
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+  experimental: {
+    workflow: {
+      world: "@workflow/world-postgres",
+    },
+  },
+});
+```
+
+Install the world package in your app. It should export a default factory or a `createWorld()` function. Put credentials and host-specific options in runtime environment variables read by the world package, not in `agent.ts`. If the installed package must stay external in hosted output, list it in `build.externalDependencies`.
+
+## All defineAgent fields
+
+| Field | Type | Default | Description |
+| -------------- | ------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model` | `string \| LanguageModel` | — | Gateway model ID string or a provider-authored `LanguageModel`. Required when `agent.ts` is present. |
+| `description` | `string` | — | Required on declared subagents. The parent reads it to decide when to delegate. |
+| `modelOptions` | `AgentModelOptionsDefinition` | none | Provider option overrides forwarded to the model call (temperature, maxTokens, etc.). |
+| `compaction` | `{ thresholdPercent?: number }` | 0.9 | Controls when older turns are summarized. Lower the threshold to compact sooner. |
+| `outputSchema` | Standard Schema or JSON Schema object | none | Structured return type for task-mode runs (subagent, schedule, or remote job). |
+| `build` | `{ externalDependencies?: string[] }` | none | Hosted-build packaging controls. Lists packages to keep external in hosted output. |
+| `experimental` | `{ codeMode?: boolean; workflow?: { world?: string } }` | flags unset | Opt-in unstable flags. `codeMode` routes executable tools through a sandboxed code-execution wrapper. `workflow.world` selects the Workflow world package for self-hosted deployments. |
+
+<Warning>
+`experimental` fields can change or disappear in any release. Treat them as unstable.
+</Warning>
+
+## Where adjacent settings live
+
+| Concern | Lives in |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| Instructions prompt | `agent/instructions.md`, [Instructions](/concepts/instructions) |
+| Per-tool approval (HITL) | `agent/tools/*.ts`, [Tools](/concepts/tools) |
+| Inbound auth & network policy | the channel layer |
+| Sandbox / workspace | `agent/sandbox/`, [Sandbox](/concepts/sandbox) |
+| Telemetry & debugging | `agent/instrumentation.ts` |

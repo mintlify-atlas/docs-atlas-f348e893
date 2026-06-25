@@ -1,0 +1,169 @@
+---
+title: "Tools: Typed Functions Your Agent Can Call"
+sidebarTitle: "Tools"
+description: "Define typed actions with defineTool from eve/tools, gate sensitive calls on human approval, and use the ctx parameter for sandbox and session access."
+---
+
+A tool is a typed action the agent can call: hitting an API, running a query, reading a database, or triggering a workflow. The implementation lives in your code, runs in your app runtime with full access to `process.env`, and is never exposed to the sandbox. The file path under `agent/tools/` determines the tool name the model sees — no registration step required.
+
+## Defining a tool
+
+Create a file under `agent/tools/`. The filename slug (without the `.ts` extension) becomes the model-facing tool name. A file at `agent/tools/get_weather.ts` is exposed as `get_weather`.
+
+```ts agent/tools/get_weather.ts
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Get the current weather for a city.",
+  inputSchema: z.object({ city: z.string().min(1) }),
+  async execute({ city }, ctx) {
+    return { city, condition: "Sunny", temperatureF: 72 };
+  },
+});
+```
+
+Every tool definition needs:
+
+- **A filename slug** under `agent/tools/` — this is the model-facing name. Use snake\_case.
+- **`description`** — what the tool does, written for the model, not for humans.
+- **`inputSchema`** — a Zod schema, any Standard Schema, or a plain JSON Schema object. Required. For no input, pass `z.object({})`. Zod and Standard Schema infer the `input` type in `execute`. Plain JSON Schema types it as `Record<string, unknown>`.
+- **`execute(input, ctx)`** — the implementation. May be sync or async.
+
+For tools that return structured data, add an optional `outputSchema`. With Zod or Standard Schema it also types the `execute` return value.
+
+## The `ctx` parameter
+
+The second argument to `execute` is a context object carrying runtime accessors:
+
+| Accessor | Description |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `ctx.session` | Session metadata: turn number, auth, parent lineage. |
+| `ctx.getSandbox()` | Returns a live [sandbox](/concepts/sandbox) handle. Async. Only works inside authored runtime execution. |
+| `ctx.getSkill(id)` | Returns a packaged [skill](/concepts/skills)'s metadata and file handle. Read skill files from authored tools. |
+
+Running in the app runtime is what lets a tool import shared code from `lib/`, read `process.env`, and take part in eve's durable pause/resume model.
+
+```ts agent/tools/run_analysis.ts
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Run a Python analysis script and return its output.",
+  inputSchema: z.object({ script: z.string() }),
+  async execute({ script }, ctx) {
+    const sandbox = await ctx.getSandbox();
+    await sandbox.writeTextFile({ path: "analysis/run.py", content: script });
+    const result = await sandbox.run({ command: "python analysis/run.py" });
+    return { stdout: result.stdout };
+  },
+});
+```
+
+## Tool execution and replay
+
+eve never runs authored tools during discovery. The model sees descriptors first, and only what it actually calls gets executed. Completed steps never re-run — eve replays the recorded result. A step interrupted mid-execution re-runs, so make non-idempotent side effects (charges, emails) idempotent, or gate them with approval.
+
+## Shaping what the model sees
+
+By default the model sees the full `execute` return. Use `toModelOutput` to project it down when the tool returns rich data a channel needs for rendering but the model only needs the gist:
+
+```ts agent/tools/audit_report.ts
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Run a security audit and return a full report.",
+  inputSchema: z.object({ domain: z.string() }),
+  async execute({ domain }) {
+    const report = await runAudit(domain);
+    return report; // full data for channels and hooks
+  },
+  toModelOutput(output) {
+    return { type: "text", value: `Report for ${output.domain}: score ${output.score}.` };
+  },
+});
+```
+
+`toModelOutput` receives the full typed `execute` return and only affects what the model sees. Channel event handlers and hooks still get the full output on `action.result`. Return `{ type: "text", value }` for a summary, or `{ type: "json", value }` for a smaller object.
+
+<Warning>
+Tool outputs must be JSON-serializable. Return plain objects, arrays, strings, numbers, booleans, or `null`. Do not return secrets, credentials, unnecessary personal data, or unbounded sensitive content.
+</Warning>
+
+## Human-in-the-loop: gating tools on approval
+
+A tool can require a person to sign off before it runs. Set `needsApproval` using the helpers from `eve/tools/approval`:
+
+```ts agent/tools/refund_charge.ts
+import { defineTool } from "eve/tools";
+import { always } from "eve/tools/approval";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Refund a charge.",
+  inputSchema: z.object({ chargeId: z.string(), amount: z.number() }),
+  needsApproval: always(),
+  async execute(input) {
+    return refund(input);
+  },
+});
+```
+
+| Helper | Behavior |
+| ---------- | ---------------------------------------------------------------------------------- |
+| `never()` | Never require approval (the default when `needsApproval` is omitted). |
+| `once()` | Require approval only the first time the tool runs in a session; auto-allow after. |
+| `always()` | Require approval before every call. |
+
+When the approval decision depends on the input values, pass your own predicate instead of a helper. It receives `{ toolName, toolInput, approvedTools }` and returns a boolean:
+
+```ts
+needsApproval: ({ toolInput }) => (toolInput?.amount ?? 0) > 1000,
+```
+
+Gating a side effect on approval is also how you make non-idempotent work safe across replays: a charge or email behind `always()` can't fire from a re-run step without a fresh human decision.
+
+<Note>
+By default, omitted `needsApproval` behaves like `never()`. Require human approval for sensitive, irreversible, regulated, financial, healthcare, employment, housing, legal, safety-impacting, or external side-effecting actions.
+</Note>
+
+## The ask_question built-in tool
+
+The built-in `ask_question` tool lets the model pause mid-turn and ask the user a clarifying question or prompt a choice. It is part of the default harness — no definition required. The model calls it with:
+
+- `prompt`: the question to put to the user.
+- `options` (optional): a list of choices. Channels render these as buttons or a select menu.
+- `allowFreeform` (optional): whether the user may answer with free text instead of picking an option.
+
+`ask_question` produces the same durable pause as an approval and resumes exactly where it left off.
+
+## Default harness tools
+
+Every agent gets these built-in tools automatically, targeting the agent's [sandbox](/concepts/sandbox):
+
+| Tool | Does |
+| -------------- | ------------------------------------------------------------ |
+| `bash` | Run a shell command in the sandbox |
+| `read_file` | Read a file under `/workspace` |
+| `write_file` | Write a file under `/workspace` |
+| `glob` | Find files by pattern |
+| `grep` | Search file contents |
+| `web_fetch` | Fetch a URL |
+| `web_search` | Search the web |
+| `todo` | Manage a task list for multi-step work |
+| `load_skill` | Load a skill's markdown into the active context |
+| `ask_question` | Pause and ask the user a question |
+| `agent` | Delegate a subtask to a copy of the agent (or a subagent) |
+
+## Disabling built-in tools
+
+To remove a built-in tool, author a file at `agent/tools/<tool_name>.ts` that exports `disableTool`:
+
+```ts agent/tools/web_search.ts
+import { disableTool } from "eve/tools";
+
+export default disableTool();
+```
+
+An authored tool at `agent/tools/agent.ts` takes priority over the built-in `agent` tool.

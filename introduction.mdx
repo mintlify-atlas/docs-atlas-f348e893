@@ -1,0 +1,122 @@
+---
+title: "eve: Filesystem-First Framework for Durable Agents"
+sidebarTitle: "Introduction"
+description: "Discover how eve organises agent capabilities as ordinary files, what runs when a message arrives, and how sessions survive restarts and redeploys."
+---
+
+eve is a framework for building durable AI agents as ordinary files in a TypeScript project. Instead of one large configuration object, each part of your agent gets a clear, predictable home: instructions go in one file, tools in one folder, channels in another. eve discovers that structure, turns it into a running agent, and keeps every session alive across restarts, redeploys, and multi-turn conversations — without you writing any of that machinery yourself.
+
+## An eve project at a glance
+
+A small eve app looks like this:
+
+```text
+my-agent/
+├── package.json
+└── agent/
+    ├── agent.ts
+    ├── instructions.md
+    ├── tools/
+    │   └── get_weather.ts
+    ├── skills/
+    │   └── plan_a_trip.md
+    └── channels/
+        └── slack.ts
+```
+
+You can understand most eve projects by reading that tree:
+
+- `instructions.md` — the always-on system prompt that tells the agent who it is and how to behave.
+- `agent.ts` — chooses the model and configures runtime options.
+- `tools/` — typed functions the model can call.
+- `skills/` — longer procedures the model loads only when they are useful.
+- `channels/` — connects the agent to HTTP clients, Slack, Discord, and other messaging surfaces.
+
+Start with only `instructions.md` and `agent.ts`. Add the other folders as the agent needs them.
+
+## The filesystem is the interface
+
+eve is filesystem-first. A file's location says what it does, and its path usually gives it a name. For example, this file:
+
+```text
+agent/tools/get_weather.ts
+```
+
+defines a tool named `get_weather`:
+
+```ts agent/tools/get_weather.ts
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Get the weather for a city.",
+  inputSchema: z.object({ city: z.string() }),
+  async execute({ city }) {
+    return { city, condition: "Sunny" };
+  },
+});
+```
+
+There is no separate registry to keep in sync. Add the file and eve discovers it automatically; move or rename it and its identity moves with it.
+
+## What happens when a message arrives
+
+The same flow runs whether a message comes from a web app, the terminal, or Slack:
+
+1. eve turns the platform input into a message.
+2. The model receives its instructions, skills, tools, and conversation history.
+3. eve runs the work — calling tools and subagents as needed.
+4. Progress is saved and events are streamed in real time.
+5. The result is delivered back in the form the platform expects.
+
+That keeps agent behaviour portable. Your weather tool does not need to know whether the question came from a browser or from Slack.
+
+## Durable by default
+
+An eve session is more than one request and one response. A session can:
+
+- Stream progress while work is happening.
+- Call tools and subagents.
+- Pause for approval or a human answer.
+- Resume after that answer arrives — even much later.
+- Keep durable state across many turns.
+
+Under the hood, eve uses the open-source [Workflow SDK](https://workflow-sdk.dev) to make sessions durable, resumable, and crash-safe. eve handles that machinery so your tools can focus on the work itself.
+
+<Note>
+  Completed steps within a turn never re-run; eve replays the recorded result.
+  A step interrupted mid-execution re-runs, so make non-idempotent side effects
+  (charges, emails) idempotent, or gate them with an approval step.
+</Note>
+
+## Grow the project by adding capabilities
+
+As the agent grows, each new concern still has a predictable home:
+
+| Path             | Add it when you need…                             |
+| ---------------- | ------------------------------------------------- |
+| `connections/`   | Tools from external MCP servers                   |
+| `hooks/`         | Code that reacts to lifecycle and stream events   |
+| `sandbox/`       | A controlled workspace for files and commands     |
+| `subagents/`     | Specialist agents the root agent can delegate to  |
+| `schedules/`     | Recurring or scheduled work                       |
+| `lib/`           | Shared code imported by the other agent files     |
+
+The result stays readable before it runs. The directory tells you what the agent can do.
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Scaffold and run your first working agent in minutes.
+  </Card>
+  <Card title="Tools" href="/concepts/tools">
+    Define typed actions the model can call, with Zod schemas and full TypeScript inference.
+  </Card>
+  <Card title="Instructions" href="/concepts/instructions">
+    Shape agent behaviour with the always-on system prompt.
+  </Card>
+  <Card title="Channels" href="/channels/overview">
+    Reach the agent from Slack, Discord, or a custom web UI.
+  </Card>
+</CardGroup>

@@ -1,0 +1,317 @@
+---
+title: "Evals: Write and Run Scored Tests for Your eve Agent"
+sidebarTitle: "Evals"
+description: "Define repeatable scored checks with defineEval, assert on tool calls and replies using eve/evals/expect, and run them with the eve eval CLI command."
+---
+
+An eval is a scored check that runs your agent against real sessions and grades the result, catching regressions when you change a prompt or a tool. Drive the agent through one or more turns, assert on what it did — the run completed, the right tool ran, the reply contains the right text — and optionally ship results to Braintrust.
+
+Evals exercise the same HTTP surface your users hit. The runner boots (or targets) a real agent server, drives sessions through the TypeScript client protocol, and grades what comes back. A passing eval means the agent booted, accepted a request, and produced the result you asserted.
+
+## File structure
+
+eve discovers evals under the app-root `evals/` directory, in `.eval.ts` files. The file path is the eval's identity — you don't author an `id` or `name`. Directories group related evals.
+
+```text
+my-agent/
+├── agent/
+├── evals/
+│   ├── evals.config.ts
+│   ├── smoke.eval.ts
+│   └── weather/
+│       ├── brooklyn-forecast.eval.ts
+│       └── no-tools-for-greetings.eval.ts
+└── package.json
+```
+
+`evals/weather/brooklyn-forecast.eval.ts` becomes id `weather/brooklyn-forecast`.
+
+## `defineEval`
+
+An eval is a single `async test(t)` function. You drive the agent with `t` and assert on the run with the same `t`:
+
+```ts title="evals/weather/brooklyn-forecast.eval.ts"
+import { defineEval } from "eve/evals";
+import { includes } from "eve/evals/expect";
+
+export default defineEval({
+  description: "Basic message and tool-usage coverage for the weather agent.",
+  async test(t) {
+    await t.send("What is the weather in Brooklyn?");
+    t.completed();
+    t.calledTool("get_weather");
+    t.check(t.reply, includes("Sunny"));
+  },
+});
+```
+
+`test` is the only required field. Optional fields: `description`, `judge`, `tags`, `metadata`, `timeoutMs`, and `reporters`.
+
+## `evals.config.ts`
+
+Every `evals/` directory needs exactly one `evals.config.ts` at its root. It declares the defaults every eval shares:
+
+```ts title="evals/evals.config.ts"
+import { defineEvalConfig } from "eve/evals";
+import { Braintrust } from "eve/evals/reporters";
+
+export default defineEvalConfig({
+  judge: { model: "openai/gpt-5.4-mini" },
+  reporters: [Braintrust({ projectName: "my-agent" })],
+});
+```
+
+Everything is optional. `judge` sets the default model for LLM-as-judge assertions; a tree of fully deterministic evals can omit it. Config `reporters` observe every eval in the run — set one `Braintrust()` here instead of adding it to each eval file. CLI flags and per-eval values take precedence over the config defaults.
+
+## The `t` context
+
+`t` is both the driver and the assertion surface. You write ordinary control flow, sending turns and asserting inline.
+
+**Driver methods:**
+
+| Method | What it does |
+| ------ | ------------ |
+| `t.send(message)` | Send a turn to the agent. |
+| `t.respond(...)` | Send a HITL response. |
+| `t.respondAll(...)` | Respond to all pending input requests. |
+| `t.sendFile(...)` | Send a file attachment. |
+| `t.expectInputRequests(...)` | Assert and collect pending input requests. |
+| `t.newSession()` | Start a fresh session within the same eval. |
+
+**Read state:**
+
+| Property | What it contains |
+| -------- | ---------------- |
+| `t.reply` | The last assistant message text. |
+| `t.sessionId` | The current session id. |
+| `t.events` | All stream events observed so far. |
+
+## Assertions
+
+### Run-level assertions
+
+Run-level assertions read the whole run, take no value, and gate by default:
+
+```ts
+await t.send("What is the weather in Brooklyn?");
+t.completed();
+t.calledTool("get_weather");
+```
+
+| Assertion | Asserts |
+| --------- | ------- |
+| `t.completed()` | The run did not fail and did not park on unanswered HITL input. |
+| `t.didNotFail()` | No terminal failure (parked runs pass). |
+| `t.waiting()` | The run parked on HITL input. |
+| `t.messageIncludes(token)` | Joined assistant text contains `token` (string or RegExp). |
+| `t.calledTool(name, opts?)` | A matching tool call happened. |
+| `t.notCalledTool(name)` | No call to `name`. |
+| `t.toolOrder([...names])` | Tool names appear in order (other calls may interleave). |
+| `t.usedNoTools()` | No tool calls at all. |
+| `t.maxToolCalls(n)` | At most `n` tool calls. |
+| `t.noFailedActions()` | No tool, subagent, or skill action reported a failure. |
+| `t.calledSubagent(name, opts?)` | A subagent delegation happened. |
+| `t.outputEquals(value)` | Deep equality of the agent's structured output. |
+| `t.outputMatches(schema)` | Standard Schema (e.g. Zod) validation of structured output. |
+| `t.event(predicate, label)` | Escape hatch: any predicate over the typed event stream. |
+
+### Value assertions with `t.check`
+
+`t.check(value, assertion)` grades an explicit value against a builder from `eve/evals/expect`:
+
+```ts
+import { includes, equals, matches, similarity } from "eve/evals/expect";
+
+t.check(t.reply, includes("sunny"));           // substring (gate)
+t.check(parsed, equals({ city: "Brooklyn" })); // deep structural equality (gate)
+t.check(parsed, matches(WeatherSchema));        // Standard Schema, e.g. Zod (gate)
+t.check(t.reply, similarity("Sunny, 72F"));    // fuzzy 0–1 Levenshtein (soft)
+```
+
+| Builder | Scores | Default |
+| ------- | ------ | ------- |
+| `includes(substring)` | Value (coerced to string) contains `substring` | gate |
+| `equals(value)` | Deep structural equality | gate |
+| `matches(schema)` | Validates against a Standard Schema | gate |
+| `similarity(expected)` | Normalized Levenshtein similarity, 1 = identical | soft |
+
+### Severity
+
+Every assertion returns a chainable handle for overriding severity:
+
+```ts
+t.completed();                                              // gate (default)
+t.calledTool("get_weather").soft();                         // record as a metric, don't gate
+t.judge.autoevals.closedQA("cites a source");               // soft, tracked (no threshold)
+t.judge.autoevals.factuality(reference).atLeast(0.7);       // soft, gated at 0.7 under --strict
+t.check(t.reply, includes("error")).soft();                 // track without failing the build
+```
+
+- `.gate(threshold?)` — hard; a miss marks the eval `failed` and `eve eval` exits non-zero.
+- `.soft(threshold?)` — tracked data; a below-threshold miss marks the eval `scored` (fatal only under `--strict`).
+- `.atLeast(threshold)` — soft with a bar (equivalent to `.soft(threshold)`).
+
+### The matcher mini-language
+
+`t.calledTool` and `t.calledSubagent` take a matcher object. Each field accepts a literal (objects partial-deep-match), a RegExp, or a function:
+
+```ts
+t.calledTool("bash", { input: { command: /^pwd/ }, isError: false, times: 1 });
+
+t.calledTool("echo", { output: (value) => String(value).includes(marker) });
+
+t.calledSubagent("weather", {
+  remoteUrl: () => process.env.WEATHER_AGENT_URL!,
+  output: /72F/,
+});
+```
+
+## Running evals
+
+```bash
+eve eval                        # run all discovered evals against a local dev server
+eve eval weather                # run one eval or every eval under evals/weather/
+eve eval --url https://<app>    # target an existing server or deployment
+eve eval --tag fast             # only evals carrying a tag
+eve eval --strict               # soft below-threshold assertions also fail the exit code
+eve eval --timeout 60000        # per-eval timeout in milliseconds
+eve eval --max-concurrency 4    # cap concurrent eval executions (default 8)
+eve eval --junit .eve/junit.xml # write JUnit XML
+eve eval --list                 # print discovered evals without running
+eve eval --verbose              # stream per-eval t.log lines to stdout
+eve eval --json                 # machine-readable output
+eve eval --skip-report          # skip config and eval-defined reporters (e.g. Braintrust)
+```
+
+### Exit codes
+
+| Code | Means |
+| ---- | ----- |
+| `0` | Every eval passed its gates (and soft thresholds, under `--strict`). |
+| `1` | Any eval failed (a failed gate, an execution error, or a strict threshold miss). |
+| `2` | Configuration error. |
+
+### Artifacts
+
+Each run drops artifacts under `.eve/evals/<timestamp>/`: a run `summary.json`, a `results.jsonl` index, and per-eval assertion results, verdicts, captured event streams, and `t.log` lines. The console output stays tight; when an eval fails, the artifact has the full story.
+
+### CI
+
+A solid CI invocation is strict and machine-reportable:
+
+```bash
+eve eval --strict --junit .eve/junit.xml
+```
+
+`--strict` turns soft threshold misses into failures, so score regressions block the merge. `--junit` gives the CI provider per-eval annotations; upload the `.eve/evals/` directory as a failure artifact for the full event streams.
+
+Evals run against a live model, so the CI environment must provide model-provider credentials. Against a deployed app, add `--url`:
+
+```bash
+eve eval --strict --url "$DEPLOY_URL" --junit .eve/junit.xml
+```
+
+## Reporters
+
+Reporters ship results out to external destinations. Declare them in `evals.config.ts` to observe every eval in the run.
+
+### Braintrust
+
+```ts title="evals/evals.config.ts"
+import { defineEvalConfig } from "eve/evals";
+import { Braintrust } from "eve/evals/reporters";
+
+export default defineEvalConfig({
+  judge: { model: "openai/gpt-5.4-mini" },
+  reporters: [Braintrust({ projectName: "weather-agent" })],
+});
+```
+
+To scope Braintrust to a single eval instead:
+
+```ts title="evals/brooklyn-forecast.eval.ts"
+import { defineEval } from "eve/evals";
+import { Braintrust } from "eve/evals/reporters";
+
+export default defineEval({
+  reporters: [Braintrust({ projectName: "weather-agent" })],
+  async test(t) {
+    await t.send("What is the weather in Brooklyn?");
+    t.completed();
+  },
+});
+```
+
+<Note>
+Braintrust needs its SDK installed and credentials in the environment: `npm install braintrust` and set `BRAINTRUST_API_KEY`. Use `--skip-report` to run evals locally without shipping results.
+</Note>
+
+### JUnit
+
+The `--junit <path>` CLI flag writes JUnit XML for CI annotations without touching eval files:
+
+```bash
+eve eval --strict --junit .eve/junit.xml
+```
+
+Each eval becomes one `<testcase>` named by its path-derived id; failed gates and execution errors land as failure messages on the matching test case.
+
+### Custom reporters
+
+A reporter implements the `EvalReporter` interface from `eve/evals/reporters`:
+
+```ts
+interface EvalReporter {
+  onRunStart(evaluations: readonly EveEval[], target: EveEvalTarget): void | Promise<void>;
+  onEvalComplete(result: EveEvalResult): void | Promise<void>;
+  onRunComplete(summary: EveEvalRunSummary): void | Promise<void>;
+}
+```
+
+`onRunStart` fires once before any eval runs, `onEvalComplete` fires after each eval with its checks, scores, and verdict, and `onRunComplete` fires once with the aggregated summary.
+
+## Dataset loaders
+
+Fan out an eval over a dataset by default-exporting an array from the `.eval.ts` file. Load fixtures from JSON or YAML with `eve/evals/loaders`:
+
+```ts title="evals/weather/forecasts.eval.ts"
+import { defineEval } from "eve/evals";
+import { loadJson } from "eve/evals/loaders";
+import { includes } from "eve/evals/expect";
+
+const cases = await loadJson("evals/data/forecasts.json");
+
+export default cases.map((c) =>
+  defineEval({
+    description: `Forecast for ${c.city}`,
+    async test(t) {
+      await t.send(`What is the weather in ${c.city}?`);
+      t.completed();
+      t.check(t.reply, includes(c.expectedCondition));
+    },
+  }),
+);
+```
+
+`loadJson` and `loadYaml` are both available from `eve/evals/loaders`.
+
+## A good baseline
+
+Most agents do well with a few small smoke evals. Assert behavior with `t.completed()` plus one or two content checks, keep dataset fixtures in `evals/data/`, and reach for a judge or Braintrust only when you need fuzzy grading or shared result review. In CI, run `eve eval --strict` so soft threshold misses also fail the build.
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Client SDK" href="/guides/client-sdk">
+    The TypeScript client protocol that the eval runner uses under the hood
+  </Card>
+  <Card title="Deployment" href="/guides/deployment">
+    Target a deployed agent with eve eval --url
+  </Card>
+  <Card title="Tools" href="/concepts/tools">
+    The surface most evals assert on via t.calledTool
+  </Card>
+  <Card title="Hooks" href="/guides/hooks">
+    Observe runtime events that evals capture in t.events
+  </Card>
+</CardGroup>

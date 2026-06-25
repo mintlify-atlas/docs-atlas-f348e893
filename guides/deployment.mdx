@@ -1,0 +1,219 @@
+---
+title: "Deploy an eve Agent to Vercel or a Self-Hosted Node"
+sidebarTitle: "Deployment"
+description: "Production checklist for shipping an eve agent: build artifacts, env secrets, model routing, sandbox backend, auth, deploy, and smoke testing."
+---
+
+eve runs the same way locally, on Vercel, and on a long-running Node host. Taking an agent from `eve dev` to production is a mostly mechanical checklist. Work through the steps below in order, then smoke-test the live routes once the deployment is up.
+
+<Steps>
+
+### Run `eve build`
+
+`eve build` compiles the agent and writes the host output to disk:
+
+```bash
+eve build
+```
+
+When the `VERCEL` environment variable is set (every hosted Vercel build sets it automatically), `eve build` emits a [Vercel Build Output](https://vercel.com/docs/build-output-api) bundle under `.vercel/output/`. A plain local build skips that bundle. Either way, eve writes compiled framework artifacts under `.eve/`, including the discovery manifest, module map, and diagnostics.
+
+<Note>
+Open `.eve/` to see exactly which authored surface the deployment will load. Unexpected missing files show up here before they cause a runtime error.
+</Note>
+
+### Set environment variables and secrets
+
+Set these in your deployment environment or secret manager — never in source or compiled artifacts:
+
+- **A model credential.** On Vercel, link a Vercel project and use a gateway model id like `anthropic/claude-opus-4.8`; OIDC authentication is automatic with no provider keys to manage. Outside Vercel, either set `AI_GATEWAY_API_KEY` for gateway-routed models, or configure a direct provider model and set that provider's key — for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+- **Route-auth secrets**, for example `ROUTE_AUTH_BASIC_PASSWORD` and any JWT/OIDC signing keys referenced by your channel's `auth`.
+
+Route-auth secrets are never serialized into compiled artifacts. The runtime re-materializes them from the authored channel definition at request time. If your deployment sits behind Vercel preview protection and you want to drive it with `eve dev`, set `VERCEL_AUTOMATION_BYPASS_SECRET` locally before launching.
+
+### Configure model routing
+
+The shape of `model` in `agent/agent.ts` decides whether eve calls the Vercel AI Gateway or a provider endpoint directly.
+
+**Gateway-routed** — pass a string model id:
+
+```ts title="agent/agent.ts"
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+});
+```
+
+This works on Vercel with project OIDC, or anywhere else with `AI_GATEWAY_API_KEY` set.
+
+**Direct provider** — install the AI SDK package and pass its model object:
+
+```bash
+npm install @ai-sdk/anthropic
+```
+
+```ts title="agent/agent.ts"
+import { anthropic } from "@ai-sdk/anthropic";
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: anthropic("claude-opus-4.8"),
+});
+```
+
+With this shape, calls go directly to Anthropic and the runtime reads `ANTHROPIC_API_KEY`. The same pattern applies for OpenAI after installing `@ai-sdk/openai`, using `openai("...")`, and setting `OPENAI_API_KEY`.
+
+### Attach the sandbox backend
+
+On Vercel, the sandbox runs on hosted [Vercel Sandbox](https://vercel.com/docs/sandbox) infrastructure. Attach the backend on the sandbox definition:
+
+```ts title="agent/sandbox/sandbox.ts"
+import { defineSandbox } from "eve/sandbox";
+import { vercel } from "eve/sandbox/vercel";
+
+export default defineSandbox({
+  backend: vercel(),
+});
+```
+
+Leave `backend` off and eve falls back to `defaultBackend()`, which picks the Vercel backend on hosted builds and a local backend everywhere else — one definition, both environments.
+
+<Tip>
+For self-deployed processes, leave `defaultBackend()` in place. Only pin `vercel()` when the process should explicitly create hosted Vercel sandboxes.
+</Tip>
+
+### Replace placeholder auth
+
+Swap any scaffolded `placeholderAuth()` for your real auth policy before production traffic reaches the app. Both the framework default and the placeholder reject production browser traffic, so an unconfigured app fails closed rather than serving open routes.
+
+Available shipped helpers: `httpBasic()`, `jwtHmac()`, `jwtEcdsa()`, `oidc()`, `vercelOidc()`. You can also pass a custom `AuthFn` that validates your own sessions, API keys, or identity provider.
+
+<Warning>
+If you self-deploy outside Vercel, do not rely on `vercelOidc()` as the only production authenticator. Use your own route policy such as Basic auth, JWT/OIDC verification, or a custom verifier.
+</Warning>
+
+### Deploy
+
+**On Vercel** — use the [Vercel CLI](https://vercel.com/docs/cli) or push to a Git-connected project:
+
+```bash
+vercel deploy
+```
+
+**Self-hosted Node** — build, then start the Nitro output:
+
+```bash
+eve build
+PORT=3000 eve start --host 0.0.0.0
+```
+
+`eve start` serves the built app from `.output/` and respects `PORT` or the `--port` flag. Put TLS, routing, autoscaling, and log collection around that process the same way you would for any other Node HTTP service.
+
+### Verify the deployment
+
+Smoke-test the live routes. Health first:
+
+```bash
+curl https://<your-app>/eve/v1/health
+```
+
+Then a real turn:
+
+```bash
+curl -X POST https://<your-app>/eve/v1/session \
+  -H 'content-type: application/json' \
+  -d '{"message":"Hello from production"}'
+```
+
+The POST returns JSON with a `sessionId`. Attach to that session's stream:
+
+```bash
+curl https://<your-app>/eve/v1/session/<sessionId>/stream
+```
+
+Or drive the deployment interactively with the dev TUI — handy for preview and production smoke tests:
+
+```bash
+eve dev https://<your-app>
+```
+
+</Steps>
+
+## How portability works
+
+Nitro is the HTTP host layer. It gives eve a build artifact that serves the health, session, stream, channel, callback, and schedule routes outside the dev server. Workflow execution and sandbox execution are separate runtime adapters — they are not hidden Vercel dependencies inside Nitro.
+
+| Environment | HTTP host | Workflow | Sandbox |
+| ----------- | --------- | -------- | ------- |
+| Vercel | Vercel Build Output | Vercel Workflow SDK | `defaultBackend()` → Vercel Sandbox |
+| Self-hosted | Nitro Node output (`eve start`) | Local world (state on disk) | `defaultBackend()` → local backend |
+
+Advanced self-hosted deployments can select a different Workflow world package in the root `agent.ts`:
+
+```ts title="agent/agent.ts"
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+  experimental: {
+    workflow: {
+      world: "@acme/eve-workflow-world",
+    },
+  },
+});
+```
+
+## Build-time sandbox prewarm
+
+During hosted Vercel builds, eve prewarms reusable sandbox templates so the first session doesn't pay the cold-start cost. Prewarm runs only when both `VERCEL` and `VERCEL_DEPLOYMENT_ID` are present. A sandbox with no `bootstrap()` and no workspace seed files is skipped.
+
+<Warning>
+If build-time prewarm fails, the build fails. If `VERCEL` is set but `VERCEL_DEPLOYMENT_ID` is missing, eve warns that it skipped prewarming — do not deploy that build with `vercel deploy --prebuilt`. Run `vercel deploy` so Vercel builds from source in its hosted environment.
+</Warning>
+
+## Self-hosted deployment checklist
+
+When running outside Vercel, make each Vercel-specific choice explicit:
+
+- Let the Workflow SDK use its default local world (state under `.workflow-data`), or configure persistent storage for that directory, or select another world with `experimental.workflow.world`.
+- Use a direct AI SDK provider model object and the corresponding `*_API_KEY` when you want no Gateway dependency.
+- Use `AI_GATEWAY_API_KEY` if you still want Gateway routing from a non-Vercel host.
+- Replace `vercelOidc()` with auth that your host can verify.
+- Use `defaultBackend()`, a pinned non-Vercel backend (Docker, microsandbox), or a custom `SandboxBackend` adapter.
+- If the agent defines schedules, `eve build && eve start` starts Nitro's schedule runner automatically. If you adapt the output to a custom HTTP-only host, you must trigger scheduled work separately.
+
+## View runs in the dashboard
+
+Once deployed, the Vercel platform auto-detects `eve` as the framework and surfaces an **Agent Runs** tab under your project's **Observability** view. Browse sessions and drill into each conversation's trace from there.
+
+<Note>
+The Agent Runs tab is currently gated. Your Vercel team needs the feature enabled before it appears. Reach out to your Vercel contact to get your team enabled.
+</Note>
+
+## Deployment checklist
+
+- [ ] `eve build` succeeds and writes `.vercel/output` when `VERCEL` is set.
+- [ ] Provider keys and route-auth secrets are set in the deployment environment.
+- [ ] The sandbox backend matches the environment (`vercel()` or `defaultBackend()`).
+- [ ] On Vercel, build-time prewarm reused or built templates without failing.
+- [ ] `placeholderAuth()` is replaced with your real policy.
+- [ ] `vercel deploy` succeeds, or your self-hosted process starts with `eve start`.
+- [ ] The health, session, and stream routes respond on the deployment URL.
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Channels" href="/channels/overview">
+    Secure the routes you deployed with channel auth helpers
+  </Card>
+  <Card title="Frontend Integration" href="/guides/frontend">
+    Mount eve inside Next.js, SvelteKit, or any React app
+  </Card>
+  <Card title="Sandbox" href="/concepts/sandbox">
+    Backends, lifecycle, and credential brokering
+  </Card>
+  <Card title="Evals" href="/guides/evals">
+    Test your deployed agent with the built-in eval runner
+  </Card>
+</CardGroup>

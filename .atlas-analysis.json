@@ -1,0 +1,122 @@
+{
+  "projectType": "framework",
+  "projectName": "eve",
+  "projectDescription": "A filesystem-first TypeScript framework for building durable AI agents that run anywhere — locally, on Vercel, or self-hosted.",
+  "theme": "luma",
+  "primaryColor": "#040404",
+  "lightColor": "#7c7c7c",
+  "darkColor": "#cdcdcd",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "tutorial"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/project-layout",
+              "concepts/agent-config",
+              "concepts/instructions",
+              "concepts/tools",
+              "concepts/skills",
+              "concepts/subagents",
+              "concepts/sandbox"
+            ]
+          },
+          {
+            "group": "Channels & Connections",
+            "pages": [
+              "channels/overview",
+              "channels/platform-channels",
+              "channels/custom-channels",
+              "connections"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/deployment",
+              "guides/frontend",
+              "guides/client-sdk",
+              "guides/schedules",
+              "guides/hooks",
+              "guides/state",
+              "guides/evals"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API Reference",
+            "pages": [
+              "reference/typescript-api",
+              "reference/http-api",
+              "reference/cli",
+              "reference/project-layout"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "reference/execution-model",
+              "reference/sessions-and-streaming",
+              "reference/security-model",
+              "reference/context-control"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Filesystem-first agent authoring — file location determines identity and role",
+    "Durable sessions that survive restarts, redeploys, and timeouts via Workflow SDK",
+    "Built-in sandbox (isolated bash environment) for every agent",
+    "First-class platform channels: Slack, Discord, Teams, Telegram, Twilio, GitHub, Linear",
+    "MCP and OpenAPI connections to external services",
+    "Skills — on-demand markdown procedures loaded into context by the model",
+    "Subagents for task delegation and specialist child agents",
+    "Scheduled tasks with cron expressions via defineSchedule",
+    "Frontend hooks (useEveAgent) for React, Vue, and Svelte",
+    "TypeScript-native define* helpers: defineTool, defineAgent, defineChannel, defineSkill, defineSchedule, etc.",
+    "Human-in-the-loop approval flows",
+    "Built-in evals framework with defineEval and multiple reporters",
+    "Deployable to Vercel or any Node host via eve build / eve start"
+  ],
+  "publicApiSurface": [
+    "defineAgent (eve)",
+    "defineRemoteAgent (eve)",
+    "defineTool (eve/tools)",
+    "defineDynamic (eve/tools, eve/skills, eve/instructions)",
+    "disableTool (eve/tools)",
+    "defineSkill (eve/skills)",
+    "defineInstructions (eve/instructions)",
+    "defineChannel (eve/channels)",
+    "eveChannel, slackChannel, discordChannel, teamsChannel, telegramChannel, twilioChannel, githubChannel (eve/channels/<platform>)",
+    "defineMcpClientConnection, defineOpenAPIConnection (eve/connections)",
+    "defineHook (eve/hooks)",
+    "defineSchedule (eve/schedules)",
+    "defineState (eve/context)",
+    "defineSandbox (eve/sandbox)",
+    "defineInstrumentation (eve/instrumentation)",
+    "defineEval, defineEvalConfig (eve/evals)",
+    "useEveAgent (eve/react, eve/vue, eve/svelte)",
+    "Client, ClientSession (eve/client)",
+    "ctx.session, ctx.getSandbox(), ctx.getSkill(), ctx.getToken(), ctx.requireAuth()",
+    "POST /eve/v1/session — start a session",
+    "GET /eve/v1/session/:id/stream — stream session events (NDJSON)",
+    "POST /eve/v1/session/:id — send follow-up with continuationToken",
+    "eve init, eve dev, eve build, eve start, eve deploy, eve eval, eve channels"
+  ]
+}

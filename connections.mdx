@@ -1,0 +1,307 @@
+---
+title: "Connections: Wire MCP and OpenAPI Services to Your Agent"
+sidebarTitle: "Connections"
+description: "Connections wire MCP servers and OpenAPI APIs into your agent. Eve handles tool discovery, auth brokering, and qualified tool naming automatically."
+---
+
+A connection wires your agent into an external server you don't author — either an MCP server (Linear, GitHub, a data warehouse) or any HTTP API backed by an OpenAPI document. eve handles the parts you'd otherwise hand-roll: discovering the remote tools, surfacing them to the model, and brokering auth so credentials never reach the model's context window.
+
+Connections live under `agent/connections/`. The runtime name comes from the filename: `agent/connections/linear.ts` registers as `"linear"`. The model discovers tools through the built-in `connection_search` tool and calls them by their **qualified name** — `<connection>__<tool>` (e.g. `linear__list_issues`).
+
+## MCP connections
+
+`defineMcpClientConnection` points at an MCP server. Supply a `url` and a `description`:
+
+```ts title="agent/connections/linear.ts"
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear workspace: issues, projects, cycles, and comments.",
+  auth: {
+    getToken: async () => ({ token: process.env.LINEAR_API_TOKEN! }),
+  },
+});
+```
+
+The `url` must speak Streamable HTTP or SSE. Write `description` for the model, not for yourself — it appears in `connection_search` results and guides the model's decision about which connection to query.
+
+### Static-token auth
+
+`getToken` returns a `TokenResult` (`{ token, expiresAt? }`), and eve sends it as `Authorization: Bearer <token>` on every request. Because `getToken` runs on each connection attempt, you can mint a fresh token from an env var, a secrets manager, an internal vault, or your own OAuth exchange:
+
+```ts title="agent/connections/linear.ts"
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear workspace: issues, projects, cycles, and comments.",
+  auth: {
+    getToken: async () => ({
+      token: process.env.LINEAR_API_TOKEN!,
+      expiresAt: Date.now() + 3600 * 1000, // refresh 1 hour from now
+    }),
+  },
+});
+```
+
+If the token has a known TTL, set `expiresAt` (milliseconds since epoch) and eve refreshes ahead of time rather than waiting for a `401`.
+
+When `getToken` is the only auth, `principalType` defaults to `"app"` — one shared credential across all sessions. Switch to `principalType: "user"` when each end-user carries their own token.
+
+<Note>
+  eve resolves and caches connection tokens per step. They never land in
+  conversation history or reach the model.
+</Note>
+
+### App principal vs. user principal
+
+| Principal type | When to use                                    |
+| -------------- | ---------------------------------------------- |
+| `"app"` (default) | One shared service credential for all sessions |
+| `"user"`       | Each end-user provides their own token         |
+
+### No auth
+
+Drop `auth` entirely for servers that need no token — a localhost server during development or a public endpoint:
+
+```ts title="agent/connections/dev-server.ts"
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "http://localhost:3001/mcp",
+  description: "Local dev server.",
+});
+```
+
+<Warning>
+  Use no-auth connections only for services that are intentionally public,
+  local-only, or otherwise protected outside eve. Do not use no-auth
+  connections for sensitive third-party services.
+</Warning>
+
+### Custom headers
+
+Use `headers` when the server wants a non-Bearer scheme (e.g. an API-key header) or extra configuration. Headers stack on top of `auth`:
+
+```ts title="agent/connections/example.ts"
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://example.com/mcp",
+  description: "Example service.",
+  headers: { "X-Api-Key": process.env.EXAMPLE_API_KEY! },
+});
+```
+
+### Tool filters
+
+To narrow which remote tools the model sees, set exactly one of `tools.allow` or `tools.block`. Filtered-out tools do not appear in `connection_search`:
+
+```ts title="agent/connections/linear.ts"
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear: read-only issue access.",
+  auth: { getToken: async () => ({ token: process.env.LINEAR_API_TOKEN! }) },
+  tools: { allow: ["search_issues", "get_issue"] },
+});
+```
+
+### Per-connection approval
+
+To require human approval for every tool a connection serves, use the approval helpers from `eve/tools/approval`:
+
+```ts title="agent/connections/linear.ts"
+import { once } from "eve/tools/approval";
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear workspace.",
+  auth: { getToken: async () => ({ token: process.env.LINEAR_API_TOKEN! }) },
+  approval: once(),
+});
+```
+
+| Helper     | Behavior                                                      |
+| ---------- | ------------------------------------------------------------- |
+| `never()`  | Lets every call through with no prompt                        |
+| `once()`   | Asks for approval the first time per session                  |
+| `always()` | Asks for approval before every call                           |
+
+<Warning>
+  For connection tools that can create, modify, delete, transmit, purchase,
+  message, or access sensitive data, use approval, tool allow-lists, or other
+  safeguards appropriate to the action.
+</Warning>
+
+## OpenAPI connections
+
+`defineOpenAPIConnection` turns any OpenAPI 3.x document into connection tools — one per operation. Pass an HTTPS URL that eve fetches at runtime, or an inline parsed object:
+
+```ts title="agent/connections/petstore.ts"
+import { defineOpenAPIConnection } from "eve/connections";
+
+export default defineOpenAPIConnection({
+  spec: "https://petstore3.swagger.io/api/v3/openapi.json",
+  description: "Pet store inventory and orders.",
+  auth: { getToken: async () => ({ token: process.env.PETSTORE_TOKEN! }) },
+});
+```
+
+Each operation becomes `<connection>__<operationId>` (e.g. `petstore__getInventory`). When an operation has no `operationId`, eve derives a deterministic `<method>_<sanitized-path>` name instead.
+
+`auth`, `headers`, and `approval` work exactly as they do for MCP connections. Two fields are specific to OpenAPI:
+
+| Field        | Purpose                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`    | Base URL that operation paths resolve against. Defaults to the document's first usable `servers` entry.             |
+| `operations` | Filter keyed on `operationId` (`allow` or `block`). Mirrors `tools` on MCP but names operations instead of tools.  |
+
+### GitHub example
+
+```ts title="agent/connections/github.ts"
+import { defineOpenAPIConnection } from "eve/connections";
+
+export default defineOpenAPIConnection({
+  spec: "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json",
+  description: "GitHub REST API: repos, issues, pull requests, and more.",
+  auth: { getToken: async () => ({ token: process.env.GITHUB_TOKEN! }) },
+  operations: { allow: ["repos/get", "issues/list-for-repo", "pulls/list"] },
+});
+```
+
+## Interactive OAuth via Vercel Connect
+
+When the server uses OAuth and you want each end-user to sign in through their own browser, use interactive authorization with [Vercel Connect](https://vercel.com/docs/connect). The `connect()` helper handles consent, encrypted token storage, and refresh, then hooks all of that into eve's authorization flow:
+
+```ts title="agent/connections/linear.ts"
+import { connect } from "@vercel/connect/eve";
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear workspace: issues, projects, cycles, and comments.",
+  auth: connect("linear/myagent"),
+});
+```
+
+`"linear/myagent"` is the UID you chose when registering the Connect client. Connect-managed OAuth is user-scoped by default, so the runtime resolves the per-user token before each tool call.
+
+## Self-hosted interactive OAuth
+
+To run your own OAuth without Vercel Connect, use `defineInteractiveAuthorization` from `eve/connections`. eve mints a callback URL, parks (durably suspends) the turn, and resumes once the token comes back:
+
+```ts title="agent/connections/linear.ts"
+import {
+  ConnectionAuthorizationRequiredError,
+  defineInteractiveAuthorization,
+  defineMcpClientConnection,
+} from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear workspace.",
+  auth: defineInteractiveAuthorization<{ verifier: string }>({
+    // Probed before every tool call. Return a token or throw to start the flow.
+    getToken: async ({ principal }) => {
+      const token = await lookupCachedToken(principal);
+      if (!token) throw new ConnectionAuthorizationRequiredError("linear");
+      return { token };
+    },
+    // Runs in a durable step. Return the user-facing challenge and optional
+    // resume value the runtime journals across the park.
+    startAuthorization: async ({ callbackUrl }) => {
+      const verifier = makePkceVerifier();
+      return {
+        challenge: { url: buildAuthorizeUrl(callbackUrl, verifier) },
+        resume: { verifier },
+      };
+    },
+    // Runs when the provider redirects to the callback URL.
+    completeAuthorization: async ({ resume, callback }) => {
+      const token = await exchangeCode(resume!.verifier, callback.params.code!);
+      return { token };
+    },
+  }),
+});
+```
+
+The `challenge` object rides along verbatim on the `authorization.required` event:
+
+| Field          | Purpose                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------ |
+| `url`          | The authorize URL for redirect or device flows                                             |
+| `userCode`     | The device code, for device flows                                                          |
+| `instructions` | The call to action when there's no URL                                                     |
+| `displayName`  | Human-readable provider name channels show on the sign-in affordance (e.g. `"Salesforce"`) |
+
+### Signaling authorization state
+
+Two error classes drive the consent flow, both exported from `eve/connections`:
+
+```ts
+import {
+  ConnectionAuthorizationRequiredError,
+  ConnectionAuthorizationFailedError,
+} from "eve/connections";
+
+// User must authorize — kicks off the consent flow
+throw new ConnectionAuthorizationRequiredError("linear");
+
+// Authorization failed — surface a reason to the model
+throw new ConnectionAuthorizationFailedError("linear", {
+  reason: "access_denied",
+  retryable: false,
+});
+```
+
+To narrow a caught error, use `isConnectionAuthorizationRequiredError(err)` and `isConnectionAuthorizationFailedError(err)`. They match on `err.name`, so they survive the class-identity split that `instanceof` can hit after bundling.
+
+### Handling a revoked token mid-call
+
+`getToken` only runs _before_ a tool call. A grant revoked while a tool is mid-flight first surfaces as a downstream `401`. Instead of letting that bubble up as a plain tool error, map it to `ctx.requireAuth(provider)` — eve evicts the rejected token from its per-step cache and re-runs the consent flow:
+
+```ts title="agent/tools/list_issues.ts"
+import { connect } from "@vercel/connect/eve";
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+const linearAuth = connect("linear/myagent");
+
+export default defineTool({
+  description: "List open Linear issues.",
+  inputSchema: z.object({}),
+  async execute(_input, ctx) {
+    const { token } = await ctx.getToken(linearAuth);
+    const res = await fetch("https://api.linear.app/graphql", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) ctx.requireAuth(linearAuth);
+    return await res.json();
+  },
+});
+```
+
+## The `connection_search` tool
+
+The model uses the built-in `connection_search` tool to discover which tools are available across all registered connections before calling them. It uses each connection's `description` to decide which connection to query — so write descriptions for the model, not for humans.
+
+Qualified tool names follow the format `<connection>__<tool>`, for example:
+
+| Connection file                     | Tool name from MCP/OpenAPI | Qualified name                |
+| ----------------------------------- | --------------------------- | ----------------------------- |
+| `agent/connections/linear.ts`       | `list_issues`               | `linear__list_issues`         |
+| `agent/connections/github.ts`       | `getInventory`              | `github__getInventory`        |
+| `agent/connections/petstore.ts`     | `getInventory`              | `petstore__getInventory`      |
+
+<CardGroup cols={2}>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Authored tools live alongside connection-provided tools. The same approval helpers apply to both.
+  </Card>
+  <Card title="Deployment" icon="lock" href="/guides/deployment">
+    The full production checklist including auth and route protection.
+  </Card>
+</CardGroup>

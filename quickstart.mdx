@@ -1,47 +1,191 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with eve: Scaffold and Run Your First Agent"
+sidebarTitle: "Quickstart"
+description: "Install eve, scaffold a new agent project, add a typed tool, run it locally in the TUI, and exercise the HTTP API — all in under ten minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+eve is a filesystem-first framework for durable agents. You write capabilities under `agent/`, and eve runs the model loop, persists every session, and serves the agent over HTTP and platform channels. This guide walks you from zero to a working, tool-calling agent that you can talk to through the terminal UI and query over HTTP.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Prerequisites
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Make sure you have:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+- **Node 24 or newer** — eve pins `engines.node` to the lowest major the release supports.
+- **npm** — bundled with Node.
+
+You also need a model credential. The scaffold's default model is `anthropic/claude-sonnet-4.6`, routed through the Vercel AI Gateway. Set one of the following before you run the agent:
+
+<CodeGroup>
+
+```bash Vercel AI Gateway
+export AI_GATEWAY_API_KEY="<your-key>"
+# or, if you have Vercel CLI linked:
+# vercel link   # sets VERCEL_OIDC_TOKEN automatically
+```
+
+```bash Direct Anthropic
+export ANTHROPIC_API_KEY="<your-key>"
+# also update agent/agent.ts to use the @ai-sdk/anthropic package
+```
+
+</CodeGroup>
+
+<Note>
+  If you skip the credential, the dev TUI flags the missing key and its `/model`
+  command walks you through pasting a key or linking a project.
+</Note>
+
+### Scaffold the project
+
+`npx` runs `eve init` without installing eve globally:
+
+```bash
+npx eve@latest init my-agent
+cd my-agent
+```
+
+The command:
+
+- Creates a `my-agent/` directory using the current package manager.
+- Installs `eve`, `ai`, and `zod` as dependencies.
+- Initialises Git.
+- Starts the development server and opens the interactive terminal UI (TUI).
+
+Stop the server with **Ctrl+C** before making the edits below. The command does not create a Vercel project or deploy.
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  Pass `--channel-web-nextjs` to also scaffold a Next.js Web Chat application.
+  Every app ships the built-in HTTP channel (`agent/channels/eve.ts`) regardless
+  of which flags you use.
 </Tip>
+
+### Customise the system prompt
+
+`agent/instructions.md` is the always-on system prompt. Replace the starter text with something specific to your agent's identity:
+
+```md agent/instructions.md
+You are a concise weather demo assistant. Tell users that the weather data is mocked.
+
+- Answer only weather-related questions.
+- Always call get_weather before giving a forecast.
+```
+
+Instructions are identity and standing rules. On-demand procedures belong in skills, and actions belong in tools.
+
+### Add a tool
+
+The filename becomes the tool name the model sees and must be snake_case ASCII. Create `agent/tools/get_weather.ts`:
+
+```ts agent/tools/get_weather.ts
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+// The model sees this tool as `get_weather`, from the filename.
+export default defineTool({
+  description: "Get the current weather for a city.",
+  inputSchema: z.object({ city: z.string().min(1) }),
+  async execute({ city }) {
+    return { city, condition: "Sunny", temperatureF: 72 };
+  },
+});
+```
+
+Tools run in your app runtime with full `process.env`, not inside a sandbox. The `inputSchema` both validates the call and types the `input` you receive inside `execute`.
+
+### Confirm the model config
+
+`agent/agent.ts` holds the model and runtime config. The scaffold writes a sensible default — review it and change the model if needed:
+
+```ts agent/agent.ts
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-sonnet-4.6",
+});
+```
+
+### Run the agent
+
+Start the local development server:
+
+```bash
+npm run dev
+```
+
+The dev TUI opens. Type a message and watch the model loop play out in order:
+
+```text
+> What is the weather in Brooklyn?
+```
+
+You should see:
+1. The `get_weather` tool call with `{ city: "Brooklyn" }`.
+2. The tool result `{ city: "Brooklyn", condition: "Sunny", temperatureF: 72 }`.
+3. The model's final reply.
+
+### Send a message over HTTP
+
+Every eve app exposes a stable HTTP API. While `npm run dev` is running, start a durable session:
+
+```bash
+curl -X POST http://127.0.0.1:3000/eve/v1/session \
+  -H 'content-type: application/json' \
+  -d '{"message":"What is the weather in Brooklyn?"}'
+```
+
+The response includes:
+- A `continuationToken` in the JSON body — reuse it to resume the conversation.
+- An `x-eve-session-id` header — use it to attach to the stream.
+
+### Stream the session
+
+Attach to the session event stream using the `sessionId` from the previous step:
+
+```bash
+curl http://127.0.0.1:3000/eve/v1/session/<sessionId>/stream
+```
+
+The stream is NDJSON (`application/x-ndjson; charset=utf-8`). For this run you will see:
+
+| Event                | Description                          |
+| -------------------- | ------------------------------------ |
+| `session.started`    | The session began.                   |
+| `actions.requested`  | The model called `get_weather`.      |
+| `action.result`      | Tool returned weather data.          |
+| `message.completed`  | The model's final reply.             |
+| `session.completed`  | Session finished.                    |
+
+`reasoning.appended` and `message.appended` are optional live-streaming events. Clients that cannot surface incremental output can ignore them and rely on `reasoning.completed` and `message.completed`.
+
+### Send a follow-up message
+
+When the session is waiting for the next user message, post a follow-up using the `continuationToken`:
+
+```bash
+curl -X POST http://127.0.0.1:3000/eve/v1/session/<sessionId> \
+  -H 'content-type: application/json' \
+  -d '{"continuationToken":"<token>","message":"Now do Queens."}'
+```
+
+The agent resumes the same durable session with full conversation history intact.
+
+</Steps>
+
+## What to read next
+
+<CardGroup cols={2}>
+  <Card title="Tools" href="/concepts/tools">
+    Full `defineTool` API: output bounding, authorization, and the `toModelOutput` hook.
+  </Card>
+  <Card title="Instructions" href="/concepts/instructions">
+    Shape behaviour with the always-on system prompt and on-demand skills.
+  </Card>
+  <Card title="Channels" href="/channels/overview">
+    Connect the agent to Slack, Discord, or a custom web UI.
+  </Card>
+  <Card title="Sessions & Streaming" href="/reference/sessions-and-streaming">
+    The full event contract, continuation tokens, and durable state.
+  </Card>
+</CardGroup>

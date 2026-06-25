@@ -1,0 +1,145 @@
+---
+title: "Context Control: Managing the Agent's Context Window"
+sidebarTitle: "Context Control"
+description: "How eve manages the agent's context window: always-on instructions, on-demand skills, automatic compaction, and subagent delegation for specialization."
+---
+
+eve gives you several levers for controlling what the model sees and when. `instructions.md` (or `instructions.ts`) is always on, `skills/` are available but loaded on demand, and the workspace and sandbox are visible through tools rather than pasted into the prompt. This page explains each lever, automatic compaction, and how to pick the right one for each case.
+
+## Base identity with `instructions.md`
+
+Use `instructions.md` for the core contract of the agent — the stable behavior that should apply on every turn:
+
+```md
+You are a careful support assistant. Be concise, verify facts before replying, and explain when you
+used a tool.
+```
+
+Keep this file focused. Everything here is included in every turn's context, so long or volatile content here inflates every request.
+
+## Compose instructions in TypeScript with `instructions.ts`
+
+To build the instructions prompt from typed helpers, library code, or environment-derived values, author it as a module instead of markdown:
+
+```ts title="agent/instructions.ts"
+import { defineInstructions } from "eve/instructions";
+import { buildInstructionsPrompt } from "./lib/prompts.js";
+
+export default defineInstructions({
+  markdown: buildInstructionsPrompt(),
+});
+```
+
+Module-backed instructions run once at build time. eve captures the resulting markdown into the compiled manifest, so the runtime serves the same prompt every session without re-running the module.
+
+## Load procedures on demand with `skills/`
+
+Skills stay out of the always-on prompt by default. This keeps rich procedures available without bloating every turn. eve advertises the available skills and adds a framework-owned `load_skill` tool. When the request clearly matches a skill description, or the user names a skill explicitly, the model activates that skill, and eve appends the skill's markdown to the active instructions for later turn work.
+
+### Flat skill
+
+```md title="agent/skills/get-weather.md"
+Use the weather tool before answering forecast or temperature questions.
+```
+
+### Packaged skill
+
+```md title="agent/skills/research/SKILL.md"
+---
+description: Research unfamiliar topics before answering with confidence.
+---
+
+When the task is novel or ambiguous, gather evidence first, then answer with the key facts and the
+remaining uncertainty.
+```
+
+Packaged skills are useful when you also want sibling files such as `references/`, `assets/`, or `scripts/` under the same skill directory. Those paths show up under the runtime workspace root, so the model can inspect them with the normal file or shell tools instead of pasting their content into the prompt.
+
+## Put runtime files in the workspace, not the prompt
+
+eve does not inline the entire authored surface into the prompt. Instead, it gives the model a shallow workspace hint and runtime tools to inspect deeper when needed. Skill files are available under the active workspace root, and the model inspects them with the shared `bash` tool. This keeps prompts smaller and makes file and command work explicit.
+
+<Tip>
+If a task requires reading a large reference file, let the model fetch it on demand with `read_file` or `bash` rather than embedding it in `instructions.md`. This avoids paying the token cost on every turn.
+</Tip>
+
+## Automatic context-window compaction
+
+The default harness keeps a long session from overflowing the model's context window. Once the conversation crosses a configurable fraction of the window, eve summarizes the older turns into a compact form and keeps going.
+
+### How compaction works
+
+When the context approaches the threshold:
+1. eve emits a `compaction.requested` event (carrying `modelId`, `sessionId`, `turnId`, `usageInputTokens`).
+2. The summary uses the active turn model unless overridden.
+3. Once the compaction checkpoint is written to durable history, eve emits `compaction.completed`.
+4. The session continues with the compacted context.
+
+Compaction also preserves the framework's own tool state automatically. It resets read-before-write tracking (so a write afterward re-reads the file whose read evidence was summarized away) and re-injects the active todo list, so the model keeps its task list across the summary.
+
+### Configuring compaction
+
+Tune when compaction kicks in using the `compaction` key in `agent/agent.ts`:
+
+```ts title="agent/agent.ts"
+export default defineAgent({
+  model: "anthropic/claude-opus-4.8",
+  compaction: {
+    thresholdPercent: 0.75,
+  },
+});
+```
+
+The default threshold is `0.9` (90% of the model's context window). There is no per-tool hook to configure — compaction is managed entirely by the harness.
+
+### Compaction events
+
+| Event | Carries | Meaning |
+|---|---|---|
+| `compaction.requested` | `modelId`, `sessionId`, `turnId`, `usageInputTokens` | Compaction began; context was nearing the threshold. |
+| `compaction.completed` | — | Compaction checkpoint written to durable history; session continues. |
+
+## Delegate to a specialist with a subagent
+
+If a task deserves its own prompt and tool surface, use a local subagent instead of overloading the root agent. Subagents are a context-control lever too: they get their own `instructions.md`, tools, and sandbox, and they run inside their own delegated context instead of extending the root agent inline.
+
+<Note>
+Use subagents only for real specialization boundaries — where the task genuinely needs a different prompt, tool set, or behavior. Overusing subagents adds coordination overhead without benefit.
+</Note>
+
+## Dynamic context with `defineDynamic`
+
+The levers above are static — authored once and the same on every session. When the right context depends on who is calling (their team, tenant, plan, or feature flags), resolve it at runtime with `defineDynamic`:
+
+- `defineDynamic` in `agent/instructions/` returns the per-session system prompt.
+- `defineDynamic` in `agent/skills/` returns the set of skills a caller can load.
+
+Both read `ctx.session.auth` or channel metadata, so a caller on the billing team gets the billing instructions and playbook while no one else sees them.
+
+## Recommended context layout
+
+Pick the lever by what the context is for:
+
+| Lever | Use for |
+|---|---|
+| `instructions.md` | The agent's permanent identity. Keep it short and stable. |
+| `instructions.ts` | Composing the prompt from typed helpers at build time. |
+| `skills/` | Optional procedures that should load only when needed. Move long procedures here instead of into the always-on prompt. |
+| `tools/` | Typed integrations the model can call. |
+| Subagent | Tasks that need a genuinely different specialist surface. Use only for real specialization boundaries. |
+| Workspace / sandbox | When the model should inspect files or run commands instead of relying on pasted instructions. |
+
+<CardGroup cols={2}>
+  <Card title="Skills" href="/concepts/skills">
+    The full authoring model for on-demand procedures.
+  </Card>
+  <Card title="Subagents" href="/concepts/subagents">
+    Delegate to a specialist with its own prompt and tools.
+  </Card>
+  <Card title="Tools" href="/concepts/tools">
+    Resolve per-session capabilities with `defineDynamic`.
+  </Card>
+  <Card title="Execution Model" href="/reference/execution-model">
+    How sessions, turns, and steps run durably.
+  </Card>
+</CardGroup>

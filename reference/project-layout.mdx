@@ -1,0 +1,150 @@
+---
+title: "Project Layout Reference: Every Slot Under agent/"
+sidebarTitle: "Project Layout"
+description: "Full reference for the eve project filesystem: every authored slot under agent/, path-derived naming, workspace seeding, and subagent layout."
+---
+
+eve builds an agent by walking the filesystem under `agent/`. Each directory is an authored slot, and the slot a file lands in determines how eve loads it. There are no registries, no config arrays, and no name fields to maintain — the path is the identity.
+
+## Naming rule
+
+Identity comes from the path. You never write a `name` or `id` field on a `define*` call.
+
+| Path | Resolves to |
+|------|-------------|
+| `agent/tools/get_weather.ts` | tool `get_weather` |
+| `agent/connections/linear.ts` | connection `linear` |
+| `agent/skills/summarize.md` | skill `summarize` |
+| `agent/subagents/researcher/agent.ts` | subagent `researcher` |
+
+The root agent takes its name from the enclosing `package.json` `name` field, falling back to the app-root directory name when `package.json` has no `name`. A subagent takes its name from its directory.
+
+## Recommended layout
+
+```text
+my-agent/
+├── package.json
+├── tsconfig.json
+├── agent/
+│   ├── agent.ts
+│   ├── instructions.md
+│   ├── instrumentation.ts
+│   ├── channels/
+│   ├── connections/
+│   ├── hooks/
+│   ├── skills/
+│   ├── lib/
+│   ├── sandbox/
+│   ├── tools/
+│   ├── schedules/
+│   └── subagents/
+└── evals/
+```
+
+<Note>
+  `evals/` lives at the app root — a sibling of `agent/`, not inside it.
+</Note>
+
+## Slot table
+
+The **Subagents** column states whether a local subagent (under `subagents/<id>/`) can author this slot. A declared subagent inherits nothing from the root; it discovers its own slots independently.
+
+| Path | Description | Subagents? | Notes |
+|------|-------------|------------|-------|
+| `agent.ts` | Runtime config | Yes | Declares model, modelOptions, compaction, build, and experimental config. See [Agent Config](/concepts/agent-config). |
+| `instructions.md` / `instructions.ts` / `instructions/` | Base system prompt | Optional | A flat file, or a directory of `.md` and `.ts` files. Static sources compose at build time. Dynamic sources (`defineDynamic` + `defineInstructions`) resolve at runtime. Required on the root, optional on subagents. |
+| `instrumentation.ts` | Telemetry config | No | OTel exporter and AI SDK span settings. Auto-discovered and run before any agent code. Root-only. |
+| `channels/` | HTTP / messaging entrypoints | No | Each file is a channel definition (`defineChannel` or a platform factory). Root-only. |
+| `connections/` | External service connections (MCP, OpenAPI) | Yes | One connection per file; name derived from filename. |
+| `hooks/` | Lifecycle and stream-event subscribers | Yes | Module-backed only. Recursive directories supported. |
+| `skills/` | On-demand procedures and capability packs | Yes | Flat markdown, module-backed skills, or packaged skills. Seeded into `/workspace/skills/...` at runtime. |
+| `lib/` | Shared authored helper code | Yes | Import-only; never mounted into the runtime workspace. |
+| `sandbox.ts` or `sandbox/sandbox.ts` | The agent's single sandbox definition | Yes | Use top-level `sandbox.ts` for a definition-only override; use `sandbox/sandbox.ts` + `sandbox/workspace/**` to also seed files into the workspace. Framework default applies when neither is authored. |
+| `sandbox/workspace/**` | Files seeded into the sandbox at session start | Yes | Mirrored into `/workspace/...` at session bootstrap. |
+| `tools/` | Typed executable integrations | Yes | Module-backed only. |
+| `schedules/` | Recurring jobs | No | Each schedule is `<name>.ts` (default-exports `defineSchedule`) or `<name>.md` (frontmatter `cron:` + prompt body). Recursive nesting supported. Root-only. |
+| `subagents/` | Specialist child agents | Yes | Each child is its own local package under `subagents/<id>/`. Nested subagents are supported. |
+
+## What reaches the runtime workspace
+
+eve does not mount the entire `agent/` tree into the sandbox. Only two sources land in the sandbox workspace at runtime:
+
+| Source | Destination |
+|--------|-------------|
+| `agent/skills/` | `/workspace/skills/...` |
+| `agent/sandbox/workspace/**` | `/workspace/...` (at session bootstrap) |
+
+Everything in `lib/` stays import-only source code and never reaches the workspace.
+
+<Warning>
+  Do not rely on `lib/` files being present inside the sandbox at runtime. They are available to your TypeScript code at build and runtime through normal imports, but are not written to `/workspace/`.
+</Warning>
+
+## Local subagent layout
+
+A local subagent lives under `subagents/<id>/` and uses the same `agent.ts` shape as the root.
+
+```text
+agent/subagents/researcher/
+├── agent.ts
+├── instructions.md
+├── connections/
+├── hooks/
+├── skills/
+├── lib/
+├── sandbox/
+├── tools/
+└── subagents/
+```
+
+Rules for local subagents:
+
+- `agent.ts` is **required** and must declare a `description`. The parent reads this description on the lowered subagent tool to decide when to delegate.
+- `instructions.md` / `instructions.ts` is **optional** — unlike the root agent, where it is required.
+- `connections/`, `hooks/`, `skills/`, `lib/`, `sandbox/`, and `tools/` are all supported and discovered from the subagent's own directory.
+- `channels/` and `schedules/` are **not supported** inside local subagents.
+- Nested subagents are supported.
+
+## Flat layout
+
+Supported when the app root is also the agent root:
+
+```text
+my-agent/
+├── package.json
+├── agent.ts
+├── instructions.md
+├── tools/
+└── skills/
+```
+
+<Tip>
+  Prefer the nested layout. It keeps the app root separate from the authored surface and makes it easier to add channels, evals, and other top-level concerns later.
+</Tip>
+
+## Path-derived naming examples
+
+| Path | Name | Type |
+|------|------|------|
+| `agent/tools/search_web.ts` | `search_web` | Tool |
+| `agent/tools/github/create_pr.ts` | `github/create_pr` | Tool |
+| `agent/connections/stripe.ts` | `stripe` | Connection |
+| `agent/skills/summarize.md` | `summarize` | Skill |
+| `agent/skills/research/deep_dive.ts` | `research/deep_dive` | Skill |
+| `agent/hooks/on_turn_start.ts` | `on_turn_start` | Hook |
+| `agent/schedules/daily_digest.ts` | `daily_digest` | Schedule |
+| `agent/subagents/writer/agent.ts` | `writer` | Subagent |
+| `agent/subagents/writer/subagents/editor/agent.ts` | `editor` (child of `writer`) | Nested subagent |
+
+## Debugging: why didn't eve discover my file?
+
+Run `eve info`. It lists the discovered surface and prints discovery diagnostics. From there, check that the file sits in the correct authored slot and that the root-vs-subagent boundary is valid. eve also writes inspectable artifacts under `.eve/` — see the [CLI reference](./cli) for the full artifact list.
+
+<CardGroup cols={2}>
+  <Card title="TypeScript API" icon="code" href="./typescript-api">
+    The define* helpers and where they import from
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="./cli">
+    eve info, build, dev, and deploy commands
+  </Card>
+</CardGroup>

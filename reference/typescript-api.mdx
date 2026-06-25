@@ -1,0 +1,183 @@
+---
+title: "TypeScript API Reference: define* Helpers and Runtime Context"
+sidebarTitle: "TypeScript API"
+description: "Complete reference for every define* helper, runtime ctx members, and import paths in the eve TypeScript public API."
+---
+
+The public surface of the `eve` package is a set of `define*` helpers you author with, a runtime `ctx` object passed to each handler, and a set of secondary helpers for routing, approval, and auth. Everything exported lives in `packages/eve/src/public/index.ts`; anything not exported there is a framework internal.
+
+Identity comes from the filesystem, not a field you set. A tool at `agent/tools/get_weather.ts` is `get_weather`, and a connection at `agent/connections/linear.ts` is `linear`, so no definition carries a `name` or `id`.
+
+Most authored files share the same shape: import a helper, call it, and default-export the result.
+
+```ts title="agent/agent.ts"
+import { defineAgent } from "eve";
+
+export default defineAgent({ model: "anthropic/claude-opus-4.8" });
+```
+
+```ts title="agent/tools/get_weather.ts"
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Get the weather for a city.",
+  inputSchema: z.object({ city: z.string() }),
+  async execute({ city }, ctx) {
+    return { city, condition: "Sunny" };
+  },
+});
+```
+
+## The `define*` helpers
+
+| Helper | Import from | Authored at | Description |
+|--------|-------------|-------------|-------------|
+| `defineAgent` | `eve` | `agent/agent.ts` | Declare the root agent: model, modelOptions, compaction, build, and experimental config |
+| `defineRemoteAgent` | `eve` | `agent/subagents/<id>/agent.ts` | Declare a remote agent that the root can delegate to |
+| `defineTool` | `eve/tools` | `agent/tools/<name>.ts` | Declare a typed, executable tool with an input schema and `execute` handler |
+| `defineDynamic` | `eve/tools`, `eve/skills`, `eve/instructions` | `agent/{tools,skills,instructions}/` | Declare a resolver that re-evaluates tool, skill, or instruction lists at runtime |
+| `disableTool` | `eve/tools` | tools, hooks | Return from a dynamic resolver to remove a built-in or authored tool from the active set |
+| `defineMcpClientConnection` | `eve/connections` | `agent/connections/<name>.ts` | Declare an MCP client connection to a remote MCP server |
+| `defineOpenAPIConnection` | `eve/connections` | `agent/connections/<name>.ts` | Declare an OpenAPI connection that generates tools from a spec |
+| `defineChannel` | `eve/channels` | `agent/channels/<name>.ts` | Declare a custom HTTP or messaging channel with lifecycle handlers |
+| `eveChannel` | `eve/channels/eve` | `agent/channels/eve.ts` | The built-in eve web channel factory |
+| `slackChannel` | `eve/channels/slack` | `agent/channels/slack.ts` | The Slack channel factory |
+| `discordChannel` | `eve/channels/discord` | `agent/channels/discord.ts` | The Discord channel factory |
+| `teamsChannel` | `eve/channels/teams` | `agent/channels/teams.ts` | The Microsoft Teams channel factory |
+| `telegramChannel` | `eve/channels/telegram` | `agent/channels/telegram.ts` | The Telegram channel factory |
+| `twilioChannel` | `eve/channels/twilio` | `agent/channels/twilio.ts` | The Twilio SMS/voice channel factory |
+| `githubChannel` | `eve/channels/github` | `agent/channels/github.ts` | The GitHub channel factory |
+| `defineSkill` | `eve/skills` | `agent/skills/<name>.ts` | Declare a module-backed skill (procedure or capability pack) |
+| `defineInstructions` | `eve/instructions` | `agent/instructions.ts` | Declare a module-backed system-prompt contribution |
+| `defineHook` | `eve/hooks` | `agent/hooks/<slug>.ts` | Subscribe to lifecycle events and session-stream events |
+| `defineSchedule` | `eve/schedules` | `agent/schedules/<name>.ts` | Declare a recurring job with a cron expression and prompt |
+| `defineState` | `eve/context` | tools, hooks, lifecycle | Declare a named, typed session-scoped state slice |
+| `defineSandbox` | `eve/sandbox` | `agent/sandbox.ts` | Declare the agent's sandbox backend and configuration |
+| `defineInstrumentation` | `eve/instrumentation` | `agent/instrumentation.ts` | Declare OTel exporter settings and AI SDK span configuration |
+| `defineEval` | `eve/evals` | `evals/*.eval.ts` | Declare a single eval case with inputs, assertions, and optional scoring |
+| `defineEvalConfig` | `eve/evals` | `evals/evals.config.ts` | Declare project-level eval configuration (reporters, timeouts, thresholds) |
+| `useEveAgent` | `eve/react`, `eve/vue`, `eve/svelte` | frontend components | React/Vue/Svelte hook for connecting to an agent session from the browser |
+
+<Note>
+  `defineDynamic` is exported from three packages — `eve/tools`, `eve/skills`, and `eve/instructions` — because dynamic resolvers are slot-specific. Import it from the package that matches the slot you're resolving.
+</Note>
+
+## Runtime context (`ctx`)
+
+`ctx` is passed to your tool `execute` handlers, hook handlers, and channel event handlers. It is live only while authored code is running; reaching for it at module top level throws.
+
+| Member | Use |
+|--------|-----|
+| `ctx.session` | Current session, turn, auth, and optional parent lineage (read-only) |
+| `ctx.getSandbox()` | Resolve the live sandbox handle for the current agent |
+| `ctx.getSkill(identifier)` | Resolve a handle for a named skill visible to the current agent |
+| `ctx.getToken(provider)` | Resolve a bearer token for an inline auth provider such as `connect("...")` |
+| `ctx.requireAuth(provider)` | Evict and re-authorize an inline provider, commonly after a downstream `401` |
+
+<Warning>
+  `ctx` is scoped to a single handler invocation. Do not store it in a module-level variable or use it after the handler returns — the framework will throw.
+</Warning>
+
+## Imports at a glance
+
+| Import | Holds |
+|--------|-------|
+| `eve` | `defineAgent`, `defineRemoteAgent`, agent config types (`AgentDefinition`, `AgentWorkflowDefinition`, `AgentWorkflowWorldDefinition`, etc.) |
+| `eve/tools` | `defineTool`, `defineDynamic`, `disableTool`, `ExperimentalWorkflow` |
+| `eve/tools/defaults` | Built-in tools as plain values: `bash`, `readFile`, `writeFile`, `glob`, `grep`, `webFetch`, `webSearch`, `todo`, `loadSkill` |
+| `eve/tools/approval` | Approval predicates: `always`, `once`, `never` |
+| `eve/connections` | `defineMcpClientConnection`, `defineOpenAPIConnection` |
+| `eve/channels` | `defineChannel`, route verbs (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `WS`) |
+| `eve/channels/eve` | `eveChannel` |
+| `eve/channels/auth` | Channel auth helpers: `localDev`, `vercelOidc`, `placeholderAuth` |
+| `eve/channels/slack` | `slackChannel` |
+| `eve/channels/discord` | `discordChannel` |
+| `eve/channels/teams` | `teamsChannel` |
+| `eve/channels/telegram` | `telegramChannel` |
+| `eve/channels/twilio` | `twilioChannel` |
+| `eve/channels/github` | `githubChannel` |
+| `eve/hooks` | `defineHook` |
+| `eve/schedules` | `defineSchedule` |
+| `eve/skills` | `defineSkill`, `defineDynamic` |
+| `eve/instructions` | `defineInstructions`, `defineDynamic` |
+| `eve/context` | `defineState`, session and state types |
+| `eve/sandbox` | `defineSandbox`, sandbox backends |
+| `eve/instrumentation` | `defineInstrumentation`, `isChannel` |
+| `eve/evals` | `defineEval`, `defineEvalConfig`, eval types |
+| `eve/evals/expect` | Assertion helpers: `includes`, `equals`, `matches`, `similarity` |
+| `eve/evals/reporters` | Reporter integrations: `Braintrust`, `JUnit`, `EvalReporter` |
+| `eve/evals/loaders` | Dataset loaders: `loadJson`, `loadYaml` |
+| `eve/react` | `useEveAgent` (React) |
+| `eve/vue` | `useEveAgent` (Vue) |
+| `eve/svelte` | `useEveAgent` (Svelte) |
+| `eve/next` | Next.js bundler plugin |
+| `eve/nuxt` | Nuxt bundler plugin |
+| `eve/sveltekit` | SvelteKit bundler plugin |
+| `eve/client` | `Client`, `ClientSession` for server-to-server and scripting use |
+
+Exported types ship from the same entrypoint as the helper they describe — for example, `ToolDefinition` and `ToolContext` come from `eve/tools`. For the exhaustive list, read `packages/eve/src/public/index.ts`.
+
+## Non-`define*` helpers
+
+### Route verbs
+
+Imported from `eve/channels`, used inside `defineChannel` to declare HTTP route handlers:
+
+```ts
+import { defineChannel, GET, POST, WS } from "eve/channels";
+```
+
+Available verbs: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `WS`.
+
+### Approval predicates
+
+Imported from `eve/tools/approval`, used in tool definitions to control when the agent asks for human approval before executing:
+
+```ts
+import { always, once, never } from "eve/tools/approval";
+
+export default defineTool({
+  approval: always(),
+  // ...
+});
+```
+
+| Predicate | Meaning |
+|-----------|---------|
+| `always()` | Always require approval before executing |
+| `once()` | Require approval once per session |
+| `never()` | Never require approval (framework default) |
+
+### Channel auth helpers
+
+Imported from `eve/channels/auth`, used in `defineChannel` to protect channel routes:
+
+```ts
+import { localDev, vercelOidc, placeholderAuth } from "eve/channels/auth";
+```
+
+| Helper | Meaning |
+|--------|---------|
+| `localDev()` | Allow anonymous loopback requests in local development |
+| `vercelOidc()` | Require a valid Vercel OIDC bearer token in deployed environments |
+| `placeholderAuth()` | Stub auth — marks a route as intentionally unprotected |
+
+### Default tool values
+
+To wrap or disable a built-in tool, import its default value from `eve/tools/defaults`:
+
+```ts
+import { bash, readFile, writeFile, glob, grep, webFetch, webSearch, todo, loadSkill } from "eve/tools/defaults";
+```
+
+These are plain values representing the built-in tools — pass them to `disableTool` or use them as a base for a dynamic resolver.
+
+<CardGroup cols={2}>
+  <Card title="Project Layout" icon="folder-tree" href="./project-layout">
+    Where each define* file lives on disk
+  </Card>
+  <Card title="HTTP API" icon="webhook" href="./http-api">
+    Sessions, streaming, and follow-up messages
+  </Card>
+</CardGroup>
