@@ -1,5 +1,5 @@
 ---
-title: "Tools: Typed Functions Your Agent Can Call"
+title: "Tools: Typed Agent Actions with defineTool for eve"
 sidebarTitle: "Tools"
 description: "Define typed actions with defineTool from eve/tools, gate sensitive calls on human approval, and use the ctx parameter for sandbox and session access."
 ---
@@ -41,6 +41,8 @@ The second argument to `execute` is a context object carrying runtime accessors:
 | `ctx.session` | Session metadata: turn number, auth, parent lineage. |
 | `ctx.getSandbox()` | Returns a live [sandbox](/concepts/sandbox) handle. Async. Only works inside authored runtime execution. |
 | `ctx.getSkill(id)` | Returns a packaged [skill](/concepts/skills)'s metadata and file handle. Read skill files from authored tools. |
+| `ctx.getToken(provider)` | Resolve a bearer token for an inline auth provider. Use for tools that call OAuth-protected services. |
+| `ctx.requireAuth(provider)` | Evict and re-authorize an inline provider. Call after a downstream `401` rejects a token from `ctx.getToken`. |
 
 Running in the app runtime is what lets a tool import shared code from `lib/`, read `process.env`, and take part in eve's durable pause/resume model.
 
@@ -156,6 +158,25 @@ Every agent gets these built-in tools automatically, targeting the agent's [sand
 | `ask_question` | Pause and ask the user a question |
 | `agent` | Delegate a subtask to a copy of the agent (or a subagent) |
 
+## Overriding default harness tools
+
+The framework defaults are importable from `eve/tools/defaults` — `bash`, `readFile`, `writeFile`, `glob`, `grep`, `webFetch`, `webSearch`, `todo`, `loadSkill`. Author a file at the same slug to replace the built-in:
+
+```ts agent/tools/write_file.ts
+import { defineTool } from "eve/tools";
+import { writeFile } from "eve/tools/defaults";
+
+export default defineTool({
+  ...writeFile, // keep the default description, schema, and executor
+  async execute(input, ctx) {
+    console.log("[write_file]", input.path);
+    return writeFile.execute(input, ctx);
+  },
+});
+```
+
+Spread the default to keep its description, schema, and any framework-managed state (such as the `todo` tool's durable state key). Drop the spread and your replacement owns its own context entirely.
+
 ## Disabling built-in tools
 
 To remove a built-in tool, author a file at `agent/tools/<tool_name>.ts` that exports `disableTool`:
@@ -166,4 +187,4 @@ import { disableTool } from "eve/tools";
 export default disableTool();
 ```
 
-An authored tool at `agent/tools/agent.ts` takes priority over the built-in `agent` tool.
+If the filename matches no known framework tool, resolution fails at build time rather than silently removing nothing. An authored tool at `agent/tools/agent.ts` takes priority over the built-in `agent` tool.

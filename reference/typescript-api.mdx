@@ -1,7 +1,7 @@
 ---
-title: "TypeScript API Reference: define* Helpers and Runtime Context"
+title: "TypeScript API: define* Helpers and Runtime Context"
 sidebarTitle: "TypeScript API"
-description: "Complete reference for every define* helper, runtime ctx members, and import paths in the eve TypeScript public API."
+description: "Complete reference for every define* helper, runtime ctx members, import paths, and secondary helpers in the eve TypeScript public API."
 ---
 
 The public surface of the `eve` package is a set of `define*` helpers you author with, a runtime `ctx` object passed to each handler, and a set of secondary helpers for routing, approval, and auth. Everything exported lives in `packages/eve/src/public/index.ts`; anything not exported there is a framework internal.
@@ -48,6 +48,7 @@ export default defineTool({
 | `telegramChannel` | `eve/channels/telegram` | `agent/channels/telegram.ts` | The Telegram channel factory |
 | `twilioChannel` | `eve/channels/twilio` | `agent/channels/twilio.ts` | The Twilio SMS/voice channel factory |
 | `githubChannel` | `eve/channels/github` | `agent/channels/github.ts` | The GitHub channel factory |
+| `linearChannel` | `eve/channels/linear` | `agent/channels/linear.ts` | The Linear channel factory |
 | `defineSkill` | `eve/skills` | `agent/skills/<name>.ts` | Declare a module-backed skill (procedure or capability pack) |
 | `defineInstructions` | `eve/instructions` | `agent/instructions.ts` | Declare a module-backed system-prompt contribution |
 | `defineHook` | `eve/hooks` | `agent/hooks/<slug>.ts` | Subscribe to lifecycle events and session-stream events |
@@ -97,6 +98,7 @@ export default defineTool({
 | `eve/channels/telegram` | `telegramChannel` |
 | `eve/channels/twilio` | `twilioChannel` |
 | `eve/channels/github` | `githubChannel` |
+| `eve/channels/linear` | `linearChannel` |
 | `eve/hooks` | `defineHook` |
 | `eve/schedules` | `defineSchedule` |
 | `eve/skills` | `defineSkill`, `defineDynamic` |

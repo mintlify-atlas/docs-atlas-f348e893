@@ -1,7 +1,7 @@
 ---
 title: "Sandbox: Isolated Bash Environment for Every Agent"
 sidebarTitle: "Sandbox"
-description: "Every eve agent has an isolated /workspace sandbox with built-in bash and file tools, ctx.getSandbox() for programmatic access, and defineSandbox to customize it."
+description: "Every eve agent has an isolated /workspace sandbox. Access it from tools via ctx.getSandbox(), and customize backends or lifecycle with defineSandbox."
 ---
 
 The sandbox is the agent's isolated bash environment: a filesystem rooted at `/workspace` where the agent can run shell commands, execute scripts, and read or write files without ever touching your app runtime. Every eve agent has exactly one. The built-in `bash`, `read_file`, `write_file`, `glob`, and `grep` tools already target it, and your authored tools can reach it too via `ctx.getSandbox()`.

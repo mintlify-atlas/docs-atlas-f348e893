@@ -1,7 +1,7 @@
 ---
 title: "Connections: Wire MCP and OpenAPI Services to Your Agent"
 sidebarTitle: "Connections"
-description: "Connections wire MCP servers and OpenAPI APIs into your agent. Eve handles tool discovery, auth brokering, and qualified tool naming automatically."
+description: "Connections wire MCP servers and OpenAPI APIs into your agent. eve handles tool discovery, auth brokering, and qualified tool naming automatically."
 ---
 
 A connection wires your agent into an external server you don't author — either an MCP server (Linear, GitHub, a data warehouse) or any HTTP API backed by an OpenAPI document. eve handles the parts you'd otherwise hand-roll: discovering the remote tools, surfacing them to the model, and brokering auth so credentials never reach the model's context window.
@@ -294,7 +294,7 @@ Qualified tool names follow the format `<connection>__<tool>`, for example:
 | Connection file                     | Tool name from MCP/OpenAPI | Qualified name                |
 | ----------------------------------- | --------------------------- | ----------------------------- |
 | `agent/connections/linear.ts`       | `list_issues`               | `linear__list_issues`         |
-| `agent/connections/github.ts`       | `getInventory`              | `github__getInventory`        |
+| `agent/connections/github.ts`       | `issues/list-for-repo`      | `github__issues_list-for-repo` |
 | `agent/connections/petstore.ts`     | `getInventory`              | `petstore__getInventory`      |
 
 <CardGroup cols={2}>
